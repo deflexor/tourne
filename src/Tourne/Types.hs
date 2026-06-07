@@ -4,8 +4,23 @@ import Relude
 import Data.Aeson (FromJSON)
 import Data.Aeson qualified as Aeson
 import Data.Text qualified as Text
+import Data.Char (toLower)
+import System.IO.Unsafe (unsafePerformIO)
+import System.Environment qualified as Env
 import Brick.BChan (BChan)
 import Tourne.Audio.Types (AudioCommand)
+
+--------------------------------------------------------------------------------
+-- Configuration
+--------------------------------------------------------------------------------
+
+-- | Enable per-iteration debug logging to stderr. Off by default; set
+-- @TOURNE_DEBUG=1@ (or =true) at launch to enable.
+debugEnabled :: Bool
+debugEnabled = unsafePerformIO do
+  v <- Env.lookupEnv "TOURNE_DEBUG"
+  let norm = map toLower <$> v
+  pure (norm == Just "1" || norm == Just "true")
 
 --------------------------------------------------------------------------------
 -- Identifiers

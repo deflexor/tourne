@@ -42,16 +42,8 @@ import Tourne.Audio.Decoder qualified as Decoder
 import Tourne.Audio.Stream qualified as Stream
 
 --------------------------------------------------------------------------------
--- Debug logging
+-- FFI imports
 --------------------------------------------------------------------------------
-
--- | Enable per-iteration debug logging to stderr. Off by default; set
--- @TOURNE_DEBUG=1@ (or =true) at launch to enable.
-debugEnabled :: Bool
-debugEnabled = unsafePerformIO do
-  v <- Env.lookupEnv "TOURNE_DEBUG"
-  let norm = map toLower <$> v
-  pure (norm == Just "1" || norm == Just "true")
 
 -- | FFI import for SDL_GetQueuedAudioSize (not exposed by Haskell sdl2 bindings)
 foreign import ccall "SDL_GetQueuedAudioSize"

@@ -19,6 +19,7 @@ import System.IO (hFlush, hPutStrLn)
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Data.CaseInsensitive qualified as CI
 import Tourne.Http (getSharedManager)
+import Tourne.Types (debugEnabled)
 
 --------------------------------------------------------------------------------
 -- Stream handle
@@ -75,7 +76,8 @@ openStream urlText = do
                     | CI.foldCase k == "icy-metaint" = Just v
                     | otherwise = acc
           when (icyMetaint > 0) $
-            hPutStrLn stderr ("[feed] icy-metaint=" <> show icyMetaint)
+            when debugEnabled $
+              hPutStrLn stderr ("[feed] icy-metaint=" <> show icyMetaint)
           feedStream bodyReader chan cancelRef icyMetaint
       case streamResult of
         Left (e :: SomeException) -> do
@@ -169,8 +171,9 @@ feedStream bodyReader chan cancelRef metaInterval = do
               unless (BS.null acc) $ do
                 STM.atomically $ STM.writeTChan chan acc
                 let accKb = BS.length acc `div` 1024
-                hPutStrLn stderr ("feed send final chunk=" <> show accKb <> "KB")
-                hFlush stderr
+                when debugEnabled $ do
+                  hPutStrLn stderr ("feed send final chunk=" <> show accKb <> "KB")
+                  hFlush stderr
               STM.atomically $ STM.writeTChan chan BS.empty  -- Signal end
             else do
               let rawSize = BS.length chunk
@@ -178,15 +181,17 @@ feedStream bodyReader chan cancelRef metaInterval = do
                   strippedSize = BS.length cleanChunk
                   newAcc = acc <> cleanChunk
               when (metaInterval > 0 && rawSize /= strippedSize) $
-                hPutStrLn stderr ("[strip] raw=" <> show rawSize <> " stripped=" <> show strippedSize <> " diff=" <> show (rawSize - strippedSize) <> " rem=" <> show remaining')
+                when debugEnabled $
+                  hPutStrLn stderr ("[strip] raw=" <> show rawSize <> " stripped=" <> show strippedSize <> " diff=" <> show (rawSize - strippedSize) <> " rem=" <> show remaining')
               if BS.length newAcc >= minBatchSize
                 then do
                   STM.atomically $ STM.writeTChan chan newAcc
                   let accKb = BS.length newAcc `div` 1024
                   now <- getCurrentTime
                   let elapsedMs = round (realToFrac (diffUTCTime now t0) * 1000 :: Double) :: Int
-                  hPutStrLn stderr ("feed send chunk=" <> show accKb <> "KB elapsed_ms=" <> show elapsedMs)
-                  hFlush stderr
+                  when debugEnabled $ do
+                    hPutStrLn stderr ("feed send chunk=" <> show accKb <> "KB elapsed_ms=" <> show elapsedMs)
+                    hFlush stderr
                   go BS.empty remaining' now
                 else go newAcc remaining' t0
 
