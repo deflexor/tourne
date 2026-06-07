@@ -246,9 +246,17 @@ handleSelect = do
     FocusStations -> do
       stations <- gets appStations
       idx      <- gets (listSelected . appStationsListState)
-      if idx >= 0 && idx < length stations
+      -- Sort the same way as the display (see Draw.hs renderStationsList)
+      let sorted = List.sortBy (\a b ->
+            case (stationPing a, stationPing b) of
+              (Nothing, Nothing) -> compare (stationName a) (stationName b)
+              (Nothing, Just _)  -> GT
+              (Just _, Nothing)  -> LT
+              (Just pa, Just pb) -> compare pa pb
+            ) stations
+      if idx >= 0 && idx < length sorted
         then do
-          let station = List.genericIndex stations idx
+          let station = List.genericIndex sorted idx
           modifySt $ \s -> s
             { appSelectedStation = Just (stationId station)
             , appPlayerState = Connecting (stationUrl station)

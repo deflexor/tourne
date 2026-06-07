@@ -3,17 +3,21 @@ module Tourne.Audio.Stream
   , openStream
   , closeStream
   , readStreamChunk
+  , drainStreamChunks
   ) where
 
-import Relude
+import Relude hiding (hFlush)
 import Control.Concurrent (forkIO)
 import Control.Exception (try)
 import Network.HTTP.Conduit qualified as HTTP
 import Network.HTTP.Client qualified as HC
 import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BSC
 import Control.Concurrent.STM qualified as STM
-import Control.Concurrent.STM.TChan qualified as STM
 import Data.IORef qualified as IORef
+import System.IO (hFlush, hPutStrLn)
+import Data.Time.Clock (getCurrentTime, diffUTCTime)
+import Data.CaseInsensitive qualified as CI
 
 --------------------------------------------------------------------------------
 -- Stream handle
@@ -58,7 +62,20 @@ openStream urlText = do
         let streamingReq = req { HC.checkResponse = \_ _ -> pure () }
         HC.withResponse streamingReq mgr \response -> do
           let bodyReader = HC.responseBody response
-          feedStream bodyReader chan cancelRef
+              -- Detect ICY metadata interval from response headers
+              icyMetaint = case HC.responseHeaders response of
+                headers -> case foldr go Nothing headers of
+                  Just val -> case BSC.readInt val of
+                    Just (n, _) | n > 0 -> n
+                    _ -> 0
+                  Nothing -> 0
+                where
+                  go (k, v) acc
+                    | CI.foldCase k == "icy-metaint" = Just v
+                    | otherwise = acc
+          when (icyMetaint > 0) $
+            hPutStrLn stderr ("[feed] icy-metaint=" <> show icyMetaint)
+          feedStream bodyReader chan cancelRef icyMetaint
       case streamResult of
         Left (e :: SomeException) -> do
           IORef.writeIORef errRef (Just $ show e)
@@ -78,21 +95,99 @@ openStream urlText = do
     Right handle -> pure (Right handle)
     Left (e :: SomeException) -> pure (Left $ show e)
 
--- | Feed stream data from body reader to channel
-feedStream :: HC.BodyReader -> STM.TChan ByteString -> IORef.IORef Bool -> IO ()
-feedStream bodyReader chan cancelRef = go
+-- | Strip ICY metadata blocks from a byte stream chunk.
+-- Takes the metadata interval, remaining bytes before next metadata boundary,
+-- and an input chunk. Returns (clean bytes, new remaining count).
+--
+-- Remaining is interpreted as:
+--   > 0: bytes of clean MP3 data we can consume before next metadata block
+--   = 0: at a metadata boundary (next byte is metadata length header)
+--   < 0: still consuming metadata body that spanned a chunk boundary
+--        (value is negative deficit of bytes still to skip)
+--
+-- When interval=0, passes through unchanged.
+stripIcyMeta :: Int -> Int -> ByteString -> (ByteString, Int)
+stripIcyMeta interval remaining bs
+  | interval <= 0 = (bs, remaining)
+  | BS.null bs    = (BS.empty, remaining)
+  | remaining < 0 =
+      -- Still consuming metadata from a previous incomplete boundary.
+      -- Skip deficit bytes before counting any clean data.
+      let deficit = -remaining
+          skip    = min deficit (BS.length bs)
+          bs'     = BS.drop skip bs
+          deficit' = deficit - skip
+      in if deficit' > 0
+         then stripIcyMeta interval (-deficit') bs'
+         else stripIcyMeta interval interval bs'
+  | otherwise     = go [] remaining bs
   where
-    go = do
+    go acc n bytes
+      | BS.null bytes = (BS.concat (reverse acc), n)
+      | otherwise =
+          let takeLen = min n (BS.length bytes)
+              (clean, rest) = BS.splitAt takeLen bytes
+              acc' = clean : acc
+              n' = n - takeLen
+          in if n' > 0
+             then go acc' n' rest
+              else
+                -- Hit metadata boundary: consume 1 length byte + L*16 data bytes
+                case BS.uncons rest of
+                  Nothing -> (BS.concat (reverse acc'), 0)
+                  Just (metaLenByte, afterMeta) ->
+                    let metaLen = fromIntegral metaLenByte * 16
+                        availableMeta = BS.length afterMeta
+                    in if availableMeta >= metaLen
+                       then
+                         -- Complete metadata block consumed
+                         let afterMetaBlock = BS.drop metaLen afterMeta
+                         in go acc' interval afterMetaBlock
+                       else
+                         -- Metadata body truncated by chunk boundary;
+                         -- consume what's available, return deficit as negative
+                         let deficit = metaLen - availableMeta
+                         in (BS.concat (reverse acc'), -deficit)
+
+-- | Feed stream data from body reader to channel.
+-- Strips ICY metadata if metaInterval > 0.
+feedStream :: HC.BodyReader -> STM.TChan ByteString -> IORef.IORef Bool -> Int -> IO ()
+feedStream bodyReader chan cancelRef metaInterval = do
+  startTime <- getCurrentTime
+  go BS.empty metaInterval startTime  -- start with full interval before first meta boundary
+  where
+    minBatchSize = 32768
+    go acc remaining t0 = do
       cancelled <- IORef.readIORef cancelRef
       if cancelled
         then STM.atomically $ STM.writeTChan chan BS.empty
         else do
           chunk <- HC.brRead bodyReader
           if BS.null chunk
-            then STM.atomically $ STM.writeTChan chan BS.empty  -- Signal end
+            then do
+              unless (BS.null acc) $ do
+                STM.atomically $ STM.writeTChan chan acc
+                let accKb = BS.length acc `div` 1024
+                hPutStrLn stderr ("feed send final chunk=" <> show accKb <> "KB")
+                hFlush stderr
+              STM.atomically $ STM.writeTChan chan BS.empty  -- Signal end
             else do
-              STM.atomically $ STM.writeTChan chan chunk
-              go
+              let rawSize = BS.length chunk
+                  (cleanChunk, remaining') = stripIcyMeta metaInterval remaining chunk
+                  strippedSize = BS.length cleanChunk
+                  newAcc = acc <> cleanChunk
+              when (metaInterval > 0 && rawSize /= strippedSize) $
+                hPutStrLn stderr ("[strip] raw=" <> show rawSize <> " stripped=" <> show strippedSize <> " diff=" <> show (rawSize - strippedSize) <> " rem=" <> show remaining')
+              if BS.length newAcc >= minBatchSize
+                then do
+                  STM.atomically $ STM.writeTChan chan newAcc
+                  let accKb = BS.length newAcc `div` 1024
+                  now <- getCurrentTime
+                  let elapsedMs = round (realToFrac (diffUTCTime now t0) * 1000 :: Double) :: Int
+                  hPutStrLn stderr ("feed send chunk=" <> show accKb <> "KB elapsed_ms=" <> show elapsedMs)
+                  hFlush stderr
+                  go BS.empty remaining' now
+                else go newAcc remaining' t0
 
 --------------------------------------------------------------------------------
 -- Public API
@@ -104,6 +199,19 @@ readStreamChunk StreamHandle{shChunks} = do
   if BS.null chunk
     then pure Nothing
     else pure (Just chunk)
+
+-- | Non-blocking read: returns all chunks currently available in the channel
+-- without waiting for more data. An empty result means no data right now.
+drainStreamChunks :: StreamHandle -> IO [ByteString]
+drainStreamChunks StreamHandle{shChunks} = go
+  where
+    go = do
+      mbChunk <- STM.atomically $ STM.tryReadTChan shChunks
+      case mbChunk of
+        Nothing -> pure []
+        Just chunk
+          | BS.null chunk -> pure []
+          | otherwise     -> (chunk:) <$> go
 
 closeStream :: StreamHandle -> IO ()
 closeStream StreamHandle{shCancel, shError} = do

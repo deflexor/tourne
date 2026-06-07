@@ -122,21 +122,19 @@ collectFrames :: Ptr Mpg123Handle -> [AudioFrame] -> IO [AudioFrame]
 collectFrames h acc = do
   let bufSize = 16384 :: CSize
   allocaBytes (fromIntegral bufSize) $ \buf -> do
-    bytesRead <- alloca $ \pBytes -> do
+    (rc, bytesRead) <- alloca $ \pBytes -> do
       poke pBytes 0
       rc <- c_mpg123_read h buf bufSize pBytes
-      -- MPG123_ERR (-1) or MPG123_NEED_MORE (-10): no data available
-      if rc == (-1) || rc == (-10)
-        then pure 0
-        else peek pBytes
+      n <- peek pBytes
+      pure (rc, n)
 
     let nBytes = fromIntegral bytesRead :: Int
-    if nBytes <= 0
+    if nBytes <= 0 || rc == (-1)
       then pure (reverse acc)
       else do
         pcmBytes <- BS.packCStringLen (castPtr buf, nBytes)
 
-        -- Read actual format from the decoder (handles MPG123_NEW_FORMAT changes)
+        -- Re-read format on every call to handle MPG123_NEW_FORMAT (-11)
         (rate, channels, _encoding) <- alloca $ \pRate -> alloca $ \pChan -> alloca $ \pEnc -> do
           _ <- c_mpg123_getformat h pRate pChan pEnc
           (,,) <$> fmap fromIntegral (peek pRate)

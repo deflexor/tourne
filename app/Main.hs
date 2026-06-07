@@ -14,7 +14,7 @@ import Tourne.Config
 import Tourne.RadioBrowser qualified as RB
 import Tourne.AdDetection qualified as AD
 import Tourne.Audio.Player qualified as Audio
-import Tourne.PingChecker qualified as Ping
+-- import Tourne.PingChecker qualified as Ping
 import Tourne.TUI.App qualified as TUI
 
 --------------------------------------------------------------------------------
@@ -47,8 +47,8 @@ main = do
   stationsVar <- STM.newTVarIO []
 
   -- Start background ping checker
-  _pingHandle <- Ping.startPingChecker cfg stationsVar
-    (\sid result -> writeBChan chan (EvPingUpdate sid result))
+  -- _pingHandle <- Ping.startPingChecker cfg stationsVar
+  --   (\sid result -> writeBChan chan (EvPingUpdate sid result))
 
   -- Create initial app state (with reference to event channel)
   initialState <- TUI.initialAppState cfg (Just chan)
