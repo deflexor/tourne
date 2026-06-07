@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "tourne",
+  "project_id": "181f75a4-c1d7-44a3-826a-75b5f52205c2"
+}
