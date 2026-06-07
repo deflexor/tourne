@@ -1,0 +1,9 @@
+
+We want to write terminal radio listening app using tui, we want to use this api to get radio stations https://api.radio-browser.info/. we want our app to have simple but useful interface with hotkeys help line on the bottom. On the left we want narrow window with tags list, user can navigate with up/down keys and select by space or mouse click, 'Home'/ 'End' keys supported, to. Whe nuser slects tag, in the main pane we update list of radio stations with their bitrate and ping (ping updater process running in background). On the bottom we have status line displaying current status of player (Playing, Buffering.. with progress, Connecting, Error: ..., etc) and help line with hotkeys on the bottom. User can press '/' any time to open small search textbox to type text and stations on the main pane would real time filtered by typed text, on Esc key search textbox close and filter cancels, on Enter key search box close and filter persists.
+Main stations list also navigable with arrow or j/k keys and Home/End/PgUp/PgDwn, sorted byt ping by default.
+Each station has to be checked for ping (in fast non blocking manner) and that ping should be visible to user, found radios also should be sorted by ping.
+User can have slow internet so, we want to have good buffering to provide smooth listening experience without pauses, if we see that connection is not stable and stream is goung to interrupt then we switch to similar station (same genre and bitrate) with good ping but seamlessly (no interrupt or stutter).
+Also we want to have experimental advertisement detection module (usually lot of speech and higher volume), if adv detect enabled we switch to other station when it starts. As of tech we want to use something with good concurrency and parallelism support - Haskell with Effectful and Relude libs, extensions to make code more typesafe and less verbose (no Stack ).
+
+
+
