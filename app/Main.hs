@@ -3,6 +3,7 @@ module Main (main) where
 import Relude
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM qualified as STM
+import System.IO (hPutStrLn)
 import Brick.BChan (BChan, newBChan, writeBChan)
 import Brick.Main (customMain)
 import Graphics.Vty.CrossPlatform (mkVty)
@@ -27,7 +28,11 @@ main = do
   chan <- newBChan 100
 
   -- Initialize audio engine
-  audioEngine <- Audio.initAudio
+  audioEngine <- Audio.initAudio >>= \case
+    Right e  -> pure e
+    Left err -> do
+      hPutStrLn stderr ("Audio init failed: " <> toString err)
+      exitFailure
 
   -- Initialize ad detector
   _adDetector <- AD.initAdDetector

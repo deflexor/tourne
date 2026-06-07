@@ -61,6 +61,21 @@ instance FromJSON Tag where
     pure Tag{..}
 
 --------------------------------------------------------------------------------
+-- Sorting
+--------------------------------------------------------------------------------
+
+-- | Order stations for display: known ping first (ascending), then unknown
+-- ping sorted by name. Shared by the renderer (Draw) and the selection
+-- handler (Events) so both always agree on order.
+sortStationsByPing :: [Station] -> [Station]
+sortStationsByPing = sortBy \a b ->
+  case (stationPing a, stationPing b) of
+    (Nothing, Nothing) -> compare (stationName a) (stationName b)
+    (Nothing, Just _)  -> GT
+    (Just _, Nothing)  -> LT
+    (Just pa, Just pb) -> compare pa pb
+
+--------------------------------------------------------------------------------
 -- Player state
 --------------------------------------------------------------------------------
 

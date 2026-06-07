@@ -45,13 +45,13 @@ runPingChecker
 runPingChecker cancelVar cfg stationVar onResult = do
   let loop = do
         cancelled <- STM.atomically $ STM.readTVar cancelVar
-        when (not cancelled) $ do
+        unless cancelled $ do
           stations <- STM.atomically $ STM.readTVar stationVar
           -- Ping up to 10 stations per cycle
           let toPing = take 10 stations
           forM_ toPing $ \station -> do
             cancelled' <- STM.atomically $ STM.readTVar cancelVar
-            when (not cancelled') $ do
+            unless cancelled' $ do
               pingStation station >>= onResult (stationId station)
           threadDelay (30 * 1000000)  -- 30 seconds between cycles
           loop

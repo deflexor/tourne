@@ -20,6 +20,7 @@ import Data.Text qualified as Text
 import Network.HTTP.Types.Header (hUserAgent, HeaderName)
 import Network.HTTP.Types.URI (QueryItem)
 import Tourne.Types
+import Tourne.Http (getSharedManager)
 
 --------------------------------------------------------------------------------
 -- Query parameters
@@ -59,7 +60,7 @@ apiGet path = do
   result <- try $ do
     initReq <- parseRequest (toString url)
     let req = initReq { HTTP.requestHeaders = jsonHeader }
-    mgr <- HTTP.newManager HTTP.tlsManagerSettings
+    mgr <- getSharedManager
     response <- HTTP.httpLbs req mgr
     pure (Aeson.eitherDecode (HTTP.responseBody response))
   case result of
@@ -81,7 +82,7 @@ fetchTags = do
 
 -- | Sort tags by station count (most popular first)
 sortTags :: [Tag] -> [Tag]
-sortTags = sortBy (flip compare `on` tagStationCount)
+sortTags = sortOn (Down . tagStationCount)
 
 --------------------------------------------------------------------------------
 -- Station fetching
@@ -107,6 +108,7 @@ searchStations query = do
     Right stations -> pure $ Right $ sortStations stations
     Left e         -> pure $ Left e
 
--- | Sort stations (by click count, descending)
+-- | Sort stations by click count (descending); stations with no click count
+-- are treated as 0 so they sort last.
 sortStations :: [Station] -> [Station]
-sortStations = sortBy (\a b -> compare (stationClickCount b) (stationClickCount a))
+sortStations = sortOn (Down . fromMaybe 0 . stationClickCount)

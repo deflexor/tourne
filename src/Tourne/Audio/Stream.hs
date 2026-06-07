@@ -18,6 +18,7 @@ import Data.IORef qualified as IORef
 import System.IO (hFlush, hPutStrLn)
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Data.CaseInsensitive qualified as CI
+import Tourne.Http (getSharedManager)
 
 --------------------------------------------------------------------------------
 -- Stream handle
@@ -42,7 +43,7 @@ openStream urlText = do
     cancelRef <- IORef.newIORef False
 
     -- Create manager
-    mgr <- HTTP.newManager HTTP.tlsManagerSettings
+    mgr <- getSharedManager
 
     -- Parse and configure request
     initReq <- HTTP.parseRequest (toString urlText)

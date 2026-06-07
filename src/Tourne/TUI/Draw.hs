@@ -89,14 +89,8 @@ renderStationsList st =
     off  = listOffset (appStationsListState st)
     stns = appStations st
     focused = appFocus st == FocusStations
-    -- Sort: stations with known ping first (ascending), then unknown ping sorted by name
-    sorted  = List.sortBy (\a b ->
-      case (stationPing a, stationPing b) of
-        (Nothing, Nothing) -> compare (stationName a) (stationName b)
-        (Nothing, Just _)  -> GT
-        (Just _, Nothing)  -> LT
-        (Just pa, Just pb) -> compare pa pb
-      ) stns
+    -- Order: stations with known ping first (ascending), then unknown ping by name
+    sorted  = sortStationsByPing stns
     visible = drop off sorted
 
     -- Column widths (characters)

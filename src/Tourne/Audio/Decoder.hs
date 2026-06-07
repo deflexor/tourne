@@ -78,12 +78,12 @@ foreign import capi "mpg123.h mpg123_decode_frame"
 -- Safe API
 --------------------------------------------------------------------------------
 
-withMpg123 :: IO a -> IO a
+withMpg123 :: IO a -> IO (Either Text a)
 withMpg123 action = do
   rc <- c_mpg123_init
   if rc == 0
-    then action `finally` c_mpg123_exit
-    else error "Failed to initialize libmpg123"
+    then (Right <$> action) `finally` c_mpg123_exit
+    else pure (Left "Failed to initialize libmpg123")
 
 mpg123Open :: IO (Either Text (Ptr Mpg123Handle))
 mpg123Open = do
