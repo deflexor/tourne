@@ -258,7 +258,7 @@ startPlayback url decodedChan stateVar healthVar
         Right decoderHandle -> do
           -- Pre-buffer: 512 KB of decoded PCM before starting playback.
           -- ~3 seconds at 44100Hz 16-bit stereo, more at lower rates.
-          let bufferTargetBytes = 524288  -- 512 KB
+          let bufferTargetBytes = 2097152  -- 2 MB (~12 seconds at 44100/16/2)
 
           STM.atomically $ STM.writeTVar stateVar (Buffering 0 bufferTargetBytes)
           STM.atomically $ STM.writeTVar healthVar StreamGood
