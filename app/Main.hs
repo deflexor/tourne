@@ -49,7 +49,7 @@ main = do
   -- Always kick a background tag refresh so the list stays current,
   -- but the UI shows the cached tags immediately on the first frame.
   _ <- forkIO $ do
-    result <- RB.fetchTags
+    result <- RB.fetchTags cfg
     case result of
       Right tags -> writeBChan chan (EvTagsLoaded tags)
       Left err   -> writeBChan chan (EvError (toText err))
@@ -59,7 +59,7 @@ main = do
   -- trigger the auto-resume if appropriate.
   case psCurrentTag persisted of
     Just tag -> void $ forkIO $ do
-      result <- RB.fetchStationsByTag tag (configMaxStations cfg)
+      result <- RB.fetchStationsByTag cfg tag (configMaxStations cfg)
       case result of
         Right stations -> writeBChan chan (EvStationsLoaded stations)
         Left _         -> pure ()  -- keep cached list on failure
@@ -83,7 +83,7 @@ main = do
 
   -- Create initial app state (with reference to event channel), seeded
   -- from the persisted snapshot.
-  initialState <- TUI.initialAppState (Just chan) persisted
+  initialState <- TUI.initialAppState (Just chan) cfg persisted
   let initialState' = initialState
         { appAudioCommand = Just (Audio.audioCommand audioEngine)
         , appStationsVar  = Just stationsVar

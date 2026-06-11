@@ -19,6 +19,7 @@ import Data.ByteString qualified as BS
 import Data.Text qualified as Text
 import Network.HTTP.Types.Header (hUserAgent, HeaderName)
 import Network.HTTP.Types.URI (QueryItem)
+import Tourne.Config (Config, configApiBaseUrl)
 import Tourne.Types
 import Tourne.Http (getSharedManager)
 
@@ -47,16 +48,17 @@ defaultQuery = StationQuery
 -- HTTP helpers
 --------------------------------------------------------------------------------
 
-apiBase :: Text
-apiBase = "https://de1.api.radio-browser.info"
+-- | All functions in this module take a 'Config' so the API base URL
+-- is read from the single source of truth ('configApiBaseUrl') instead
+-- of being hardcoded here.
 
 jsonHeader :: [(HeaderName, BS.ByteString)]
 jsonHeader = [(hUserAgent, "TourneRadio/0.1.0")]
 
 -- | Make a GET request and parse JSON response
-apiGet :: FromJSON a => Text -> IO (Either Text a)
-apiGet path = do
-  let url = apiBase <> path
+apiGet :: FromJSON a => Text -> Text -> IO (Either Text a)
+apiGet base path = do
+  let url = base <> path
   result <- try $ do
     initReq <- parseRequest (toString url)
     let req = initReq { HTTP.requestHeaders = jsonHeader }
@@ -73,9 +75,9 @@ apiGet path = do
 --------------------------------------------------------------------------------
 
 -- | Fetch all tags from the API
-fetchTags :: IO (Either Text [Tag])
-fetchTags = do
-  result <- apiGet "/json/tags" :: IO (Either Text [Tag])
+fetchTags :: Config -> IO (Either Text [Tag])
+fetchTags cfg = do
+  result <- apiGet (configApiBaseUrl cfg) "/json/tags" :: IO (Either Text [Tag])
   case result of
     Right tags -> pure $ Right $ take 200 $ sortTags tags
     Left e     -> pure $ Left e
@@ -89,10 +91,10 @@ sortTags = sortOn (Down . tagStationCount)
 --------------------------------------------------------------------------------
 
 -- | Fetch stations by tag
-fetchStationsByTag :: Text -> Int -> IO (Either Text [Station])
-fetchStationsByTag tag limit = do
+fetchStationsByTag :: Config -> Text -> Int -> IO (Either Text [Station])
+fetchStationsByTag cfg tag limit = do
   let path = "/json/stations/bytag/" <> tag
-  result <- apiGet path :: IO (Either Text [Station])
+  result <- apiGet (configApiBaseUrl cfg) path :: IO (Either Text [Station])
   case result of
     Right stations -> do
       let sortedStations = sortByClickCount stations
@@ -100,10 +102,10 @@ fetchStationsByTag tag limit = do
     Left e -> pure $ Left e
 
 -- | Search stations by name
-searchStations :: Text -> IO (Either Text [Station])
-searchStations query = do
+searchStations :: Config -> Text -> IO (Either Text [Station])
+searchStations cfg query = do
   let path = "/json/stations/byname/" <> query
-  result <- apiGet path :: IO (Either Text [Station])
+  result <- apiGet (configApiBaseUrl cfg) path :: IO (Either Text [Station])
   case result of
     Right stations -> pure $ Right $ sortByClickCount stations
     Left e         -> pure $ Left e

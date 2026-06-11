@@ -11,6 +11,7 @@ import Brick.AttrMap (AttrMap, attrMap)
 import Graphics.Vty qualified as Vty
 import Graphics.Vty.Attributes (defAttr, withForeColor, withBackColor)
 
+import Tourne.Config (Config)
 import Tourne.Types
 import Tourne.Persistence (PersistedState (..))
 import Tourne.TUI.Core
@@ -27,8 +28,8 @@ import Brick.BChan (BChan)
 -- the same view they left on the previous run. Runtime-only fields
 -- (event channel, command sink, TVars) are left as their default
 -- 'Nothing' values and populated by 'Main' before the app launches.
-initialAppState :: Maybe (BChan AppEvent) -> PersistedState -> IO AppState
-initialAppState mChan persisted = pure AppState
+initialAppState :: Maybe (BChan AppEvent) -> Config -> PersistedState -> IO AppState
+initialAppState mChan cfg persisted = pure AppState
   { appTags              = psTags persisted
   , appStations          = initialStations persisted
   , appCurrentTag        = psCurrentTag persisted
@@ -54,6 +55,7 @@ initialAppState mChan persisted = pure AppState
   , appResumePending     = psWasPlaying persisted
   , appStationsByTag     = psStationsByTag persisted
   , appStationSort       = psStationSort persisted
+  , appConfig            = cfg
   }
 
 -- | If we have a cached station list for the last selected tag, use

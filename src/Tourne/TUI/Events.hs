@@ -384,9 +384,10 @@ handleSelect = do
                             }
           -- Fetch stations for the selected tag in background
           mChan <- gets appEventChan
+          cfg   <- gets appConfig
           case mChan of
             Just chan -> liftIO $ void $ forkIO $ do
-              result <- RB.fetchStationsByTag selectedTagName 100
+              result <- RB.fetchStationsByTag cfg selectedTagName 100
               case result of
                 Right stations -> writeBChan chan (EvStationsLoaded stations)
                 Left err       -> writeBChan chan (EvError (toText err))

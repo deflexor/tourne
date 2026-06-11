@@ -9,6 +9,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import System.Environment qualified as Env
 import Brick.BChan (BChan)
 import Tourne.Audio.Types (AudioCommand)
+import Tourne.Config (Config)
 
 --------------------------------------------------------------------------------
 -- Configuration
@@ -273,6 +274,10 @@ data AppState = AppState
   --   the 'o' key. Persisted across launches (see PersistedState).
   --   Defaults to 'SortByName' so the list is stable while
   --   background ping results stream in.
+  , appConfig            :: !Config
+  -- ^ Runtime config (API base URL, max stations, etc.). Held in
+  --   AppState so background tasks spawned from event handlers can
+  --   read config without needing a separate reference.
   }
 
 data ListState = ListState
