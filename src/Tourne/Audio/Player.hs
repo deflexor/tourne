@@ -22,7 +22,6 @@ import Foreign.Storable (poke, peek, peekByteOff, pokeByteOff)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.C.Types (CDouble(..), CInt(..))
 import Foreign.C.String (CString, peekCString)
-import System.IO.Unsafe (unsafePerformIO)
 import System.Directory (doesPathExist)
 import System.Environment qualified as Env
 import System.IO (hFlush, hPutStrLn)
@@ -456,7 +455,7 @@ processChunk chunk acc = do
         curVol <- STM.atomically $ STM.readTVar volumeVar
         t2 <- getCurrentTime
         forM_ frameList $ \frame -> do
-          let adjusted = adjustVolume (afPcmData frame) curVol
+          adjusted <- adjustVolume (afPcmData frame) curVol
           rc <- queueToDevice devId adjusted
           when (rc /= 0 && debugEnabled) $ do
             sdlErr <- c_sdl_get_error >>= peekCString
@@ -543,30 +542,31 @@ queueToDevice devId bs = do
 -- | Apply volume to PCM 16-bit signed little-endian samples.
 -- Uses pointer-based processing (unsafeCreate) to avoid list allocation
 -- and GC pressure that caused audio stuttering.
-adjustVolume :: ByteString -> Double -> ByteString
+--
+-- Lives in 'IO' because the body calls 'unsafeCreate'; the early-return
+-- branches are constant-time and allocation-free.
+adjustVolume :: ByteString -> Double -> IO ByteString
 adjustVolume bs volFactor
-  | volFactor >= 1.0 = bs
-  | volFactor <= 0.0 = BS.replicate (BS.length bs) 0
-  | otherwise = unsafePerformIO $
-      unsafeUseAsCString bs $ \src -> do
-        let len = BS.length bs
-            halfLen = len `div` 2
-            volD = CDouble volFactor
-            result = unsafeCreate len $ \dst -> do
-              let go i
-                    | i >= halfLen = pure ()
-                    | otherwise = do
-                        w <- peekByteOff src (i * 2) :: IO Word16
-                        let unsigned = fromIntegral w :: Int
-                            signed = if unsigned >= 0x8000
-                                       then unsigned - 0x10000
-                                       else unsigned
-                            adjusted = fromIntegral
-                              (round (fromIntegral signed * volD) :: Int) :: Word16
-                        pokeByteOff dst (i * 2) adjusted
-                        go (i + 1)
-              go 0
-        pure $! result
+  | volFactor >= 1.0 = pure bs
+  | volFactor <= 0.0 = pure (BS.replicate (BS.length bs) 0)
+  | otherwise = unsafeUseAsCString bs $ \src ->
+      let len     = BS.length bs
+          halfLen = len `div` 2
+          volD    = CDouble volFactor
+      in pure (unsafeCreate len $ \dst -> do
+        let go i
+              | i >= halfLen = pure ()
+              | otherwise = do
+                  w <- peekByteOff src (i * 2) :: IO Word16
+                  let unsigned = fromIntegral w :: Int
+                      signed   = if unsigned >= 0x8000
+                                   then unsigned - 0x10000
+                                   else unsigned
+                      adjusted = fromIntegral
+                        (round (fromIntegral signed * volD) :: Int) :: Word16
+                  pokeByteOff dst (i * 2) adjusted
+                  go (i + 1)
+        go 0)
 
 -- | Drain all remaining items from a channel
 drainChan :: STM.TChan a -> IO ()
