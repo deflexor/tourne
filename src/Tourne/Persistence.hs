@@ -41,6 +41,7 @@ import System.Directory
 import System.IO (hPutStrLn)
 import System.IO.Error (tryIOError)
 
+import Tourne.Error (AppError (..), renderError)
 import Tourne.Types
   ( AppState (..), Focus (..), ListState (..), Station (..), StationId, Tag
   , StationSortMode (..)
@@ -151,14 +152,14 @@ encodePersistedState = Aeson.encode
 -- Schema v1 files (no 'stationSort' field) are accepted for backward
 -- compatibility: the custom 'FromJSON' instance defaults
 -- 'psStationSort' to 'SortByName' when the field is missing.
-decodePersistedState :: BSL.ByteString -> Either Text PersistedState
+decodePersistedState :: BSL.ByteString -> Either AppError PersistedState
 decodePersistedState bs = case Aeson.eitherDecode bs of
   Right s
     | psVersion s == currentSchemaVersion -> Right s
     | psVersion s == currentSchemaVersion - 1 -> Right s
     | otherwise -> Left
-        ("unsupported schema version: " <> show (psVersion s))
-  Left err -> Left (toText err)
+        (JsonParseError ("unsupported schema version: " <> show (psVersion s)))
+  Left err -> Left (JsonParseError (toText err))
 
 --------------------------------------------------------------------------------
 -- IO
@@ -181,8 +182,8 @@ loadPersistedState = do
     Right (Right s) -> pure s
     Right (Left err) -> do
       hPutStrLn stderr
-        ("[tourne] state file at " <> path
-         <> " could not be parsed (" <> toString err
+        ("[tourne] state file at " <> toString path
+         <> " could not be parsed (" <> toString (renderError err)
          <> "); using empty state")
       pure emptyPersistedState
     Left ioErr -> do

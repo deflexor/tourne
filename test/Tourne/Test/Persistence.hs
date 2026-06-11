@@ -9,6 +9,7 @@ import Data.HashMap.Strict qualified as HashMap
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit (testCase, (@?=), assertFailure)
 
+import Tourne.Error (AppError (..), renderError)
 import Tourne.Persistence
 import Tourne.Types
 
@@ -47,7 +48,7 @@ sampleState = defaultPersistedState
 roundTrip :: PersistedState -> PersistedState
 roundTrip s = case decodePersistedState (encodePersistedState s) of
   Right s' -> s'
-  Left err -> error ("roundTrip failed: " <> err)
+  Left err -> error ("roundTrip failed: " <> renderError err)
 
 -- | A v1 schema JSON literal (no 'psStationSort' field). Mirrors the shape
 -- of the on-disk cache from before the v2 bump.
@@ -76,6 +77,13 @@ tests =
           Left _  -> pure ()
           Right s -> assertFailure
             ("expected Left for empty input, got Right: " <> show s)
+    , testCase "empty bytestring is tagged JsonParseError" $ do
+        case decodePersistedState BSL.empty of
+          Left (JsonParseError _) -> pure ()
+          Left other -> assertFailure
+            ("expected JsonParseError, got: " <> show other)
+          Right s -> assertFailure
+            ("expected Left, got Right: " <> show s)
     ]
   , testGroup "schema versioning"
     [ testCase "v1 file (no psStationSort) decodes with default SortByName" $
@@ -84,7 +92,7 @@ tests =
             psVersion s @?= 2
             psStationSort s @?= SortByName
             psVolume s @?= 0.42
-          Left err -> assertFailure ("v1 decode failed: " <> toString err)
+          Left err -> assertFailure ("v1 decode failed: " <> toString (renderError err))
     ]
   ]
   ]
