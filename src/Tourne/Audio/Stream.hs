@@ -9,7 +9,6 @@ module Tourne.Audio.Stream
 import Relude hiding (hFlush)
 import Control.Concurrent (forkIO)
 import Control.Exception (try)
-import Network.HTTP.Conduit qualified as HTTP
 import Network.HTTP.Client qualified as HC
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
@@ -47,7 +46,7 @@ openStream urlText = do
     mgr <- getSharedManager
 
     -- Parse and configure request
-    initReq <- HTTP.parseRequest (toString urlText)
+    initReq <- HC.parseRequest (toString urlText)
     let req = initReq
           { HC.method = "GET"
            , HC.requestHeaders =
@@ -87,8 +86,12 @@ openStream urlText = do
 
     pure $ StreamHandle
       { shCancel = do
+          -- Only signal cancellation. The streaming thread checks
+          -- this flag on each read; closing the shared HTTP manager
+          -- (which it would also affect, since the manager is a
+          -- process-wide singleton from Tourne.Http) would break any
+          -- concurrent stream.
           IORef.writeIORef cancelRef True
-          HTTP.closeManager mgr
       , shChunks = chan
       , shError  = errRef
       , shUrl    = urlText
