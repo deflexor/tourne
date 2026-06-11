@@ -102,3 +102,25 @@ executable tourne
     , aeson
     , bytestring
     , directory
+
+test-suite tourne-test
+  import:         defaults
+  type:           exitcode-stdio-1.0
+  hs-source-dirs: test
+  main-is:        Main.hs
+  other-modules:
+    Tourne.Test.Sorting
+    Tourne.Test.Persistence
+    Tourne.Test.Mpg123
+    Tourne.Test.Util
+  build-depends:
+    , base
+    , tourne
+    , relude
+    , aeson
+    , bytestring
+    , containers
+    , unordered-containers
+    , tasty          >= 1.4    && < 1.6
+    , tasty-hunit    >= 0.10   && < 0.11
+    , HUnit          >= 1.6    && < 1.7

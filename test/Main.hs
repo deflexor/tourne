@@ -1,0 +1,16 @@
+module Main (main) where
+
+import Relude
+import Test.Tasty (defaultMain, testGroup)
+import qualified Tourne.Test.Sorting as Sorting
+import qualified Tourne.Test.Persistence as Persistence
+import qualified Tourne.Test.Mpg123 as Mpg123
+import qualified Tourne.Test.Util as Util
+
+main :: IO ()
+main = defaultMain $ testGroup "Tourne"
+  [ testGroup "Tourne.Types.sortStations" Sorting.tests
+  , testGroup "Tourne.Persistence" Persistence.tests
+  , testGroup "Tourne.Audio.Types.Mpg123" Mpg123.tests
+  , testGroup "Tourne.Util" Util.tests
+  ]
