@@ -36,6 +36,7 @@ import SDL.Raw.Types (AudioSpec(..))
 
 
 import Tourne.Types
+import Tourne.Error (AppError (..), renderError)
 import Tourne.Audio.Types
 import Tourne.Audio.Decoder qualified as Decoder
 import Tourne.Audio.Stream qualified as Stream
@@ -117,7 +118,7 @@ queueSafetyBytes = 262144  -- 256KB
 --------------------------------------------------------------------------------
 
 -- | Initialize audio system
-initAudio :: IO (Either Text AudioEngine)
+initAudio :: IO (Either AppError AudioEngine)
 initAudio = do
   -- Set SDL to use dummy video driver (we only need audio)
   Env.setEnv "SDL_VIDEODRIVER" "dummy"
@@ -168,7 +169,7 @@ initAudio = do
       if rawDevId == 0
         then do
           sdlErr <- c_sdl_get_error >>= peekCString
-          pure (Left ("Failed to open audio device (queue mode): " <> toText sdlErr))
+          pure (Left (AudioDeviceError ("Failed to open audio device (queue mode): " <> toText sdlErr)))
         else do
           spec <- peek obtained
           let freq  = fromIntegral (audioSpecFreq spec) :: Int
@@ -270,7 +271,7 @@ startPlayback url = do
       decoderResult <- liftIO Decoder.mpg123Open
       case decoderResult of
         Left err -> liftIO $ do
-          STM.atomically $ STM.writeTVar stateVar (ErrorOccurred err)
+          STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
           Stream.closeStream streamHandle
 
         Right decoderHandle -> do
@@ -438,7 +439,7 @@ processChunk chunk acc = do
     frames <- Decoder.mpg123Feed decoderHandle chunk
     case frames of
       Left err -> do
-        STM.atomically $ STM.writeTVar stateVar (ErrorOccurred err)
+        STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
         STM.atomically $ STM.writeTChan decodedChan Nothing
         pure Nothing
       Right [] -> pure (Just acc)

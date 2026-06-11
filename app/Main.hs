@@ -11,6 +11,7 @@ import Graphics.Vty qualified as Vty
 import System.Posix.Signals (sigINT, sigTERM, installHandler, Handler(Catch))
 
 import Tourne.Types
+import Tourne.Error (renderError)
 import Tourne.Config
 import Tourne.RadioBrowser qualified as RB
 import Tourne.AdDetection qualified as AD
@@ -35,7 +36,7 @@ main = do
   audioEngine <- Audio.initAudio >>= \case
     Right e  -> pure e
     Left err -> do
-      hPutStrLn stderr ("Audio init failed: " <> toString err)
+      hPutStrLn stderr ("Audio init failed: " <> toString (renderError err))
       exitFailure
 
   -- Initialize ad detector

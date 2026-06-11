@@ -22,6 +22,7 @@ import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
 import Control.Exception (finally)
 
 import Tourne.Audio.Types
+import Tourne.Error (AppError (..))
 
 --------------------------------------------------------------------------------
 -- Types
@@ -78,14 +79,14 @@ foreign import capi "mpg123.h mpg123_decode_frame"
 -- Safe API
 --------------------------------------------------------------------------------
 
-withMpg123 :: IO a -> IO (Either Text a)
+withMpg123 :: IO a -> IO (Either AppError a)
 withMpg123 action = do
   rc <- c_mpg123_init
   if rc == 0
     then (Right <$> action) `finally` c_mpg123_exit
-    else pure (Left "Failed to initialize libmpg123")
+    else pure (Left (DecoderError "Failed to initialize libmpg123"))
 
-mpg123Open :: IO (Either Text (Ptr Mpg123Handle))
+mpg123Open :: IO (Either AppError (Ptr Mpg123Handle))
 mpg123Open = do
   alloca $ \perr -> do
     poke perr 0
@@ -95,10 +96,10 @@ mpg123Open = do
         rc <- c_mpg123_open_feed h
         if rc == 0
           then pure $ Right h
-          else c_mpg123_delete h >> pure (Left "Failed to open feed")
+          else c_mpg123_delete h >> pure (Left (DecoderError "Failed to open feed"))
       else do
         errCode <- peek perr
-        pure $ Left $ "Failed to create handle: " <> show errCode
+        pure $ Left $ DecoderError $ "Failed to create handle: " <> show errCode
 
 mpg123Close :: Ptr Mpg123Handle -> IO ()
 mpg123Close h = do
@@ -106,14 +107,14 @@ mpg123Close h = do
   c_mpg123_delete h
   pure ()
 
-mpg123Feed :: Ptr Mpg123Handle -> ByteString -> IO (Either Text [AudioFrame])
+mpg123Feed :: Ptr Mpg123Handle -> ByteString -> IO (Either AppError [AudioFrame])
 mpg123Feed h input = do
   let feedSize = fromIntegral (BS.length input) :: CSize
   feedResult <- unsafeUseAsCStringLen input $ \(cstr, _len) -> do
     c_mpg123_feed h (castPtr cstr) feedSize
 
   if feedResult /= 0 && feedResult /= (-11) && feedResult /= (-10)
-    then pure $ Left $ "Feed error: " <> show feedResult
+    then pure $ Left $ DecoderError $ "Feed error: " <> show feedResult
     else do
       frames <- collectFrames h []
       pure $ Right frames
