@@ -31,7 +31,7 @@ drawUI st =
         renderTagsList st
 
     stationsPane = B.borderWithLabel
-      (txt (" Stations " <> tagSuffix st))
+      (txt (" Stations " <> stationsHeaderSuffix st))
       (viewport StationsListName Vertical $ renderStationsList st)
 
     content = hBox [tagsPane, stationsPane]
@@ -39,16 +39,33 @@ drawUI st =
     helpLine  = renderHelp st
     baseLayout = vBox [content, statusBar, helpLine]
 
+    -- The search prompt is a single-line full-width banner at the top
+    -- of the screen. It occupies one row when open; the base layout is
+    -- pushed down by one row, but the prompt spans the entire terminal
+    -- width so there are no side gutters. Pressing Esc closes it and
+    -- restores the layout.
     fullLayout = case appSearchText st of
-      Nothing -> baseLayout
-      Just searchText ->
-        centerLayer $ renderSearch searchText
+      Nothing    -> baseLayout
+      Just query -> vBox
+        [ renderSearchPrompt query (appSearchCursor st)
+        , baseLayout
+        ]
 
   in [fullLayout]
   where
+    -- Suffix for the Stations pane title: includes the current tag and
+    -- (if set) the active filter. Examples:
+    --   ""                          — no tag, no filter
+    --   "[jazz]"                    — tag only
+    --   "(filter: 'foo')"           — filter only
+    --   "[jazz] (filter: 'foo')"    — both
+    stationsHeaderSuffix s = tagSuffix s <> filterSuffix s
     tagSuffix s = case appCurrentTag s of
       Nothing  -> ""
       Just tag -> "[" <> tag <> "]"
+    filterSuffix s = case appActiveFilter s of
+      Nothing -> ""
+      Just f  -> " (filter: '" <> f <> "')"
 
 --------------------------------------------------------------------------------
 -- Tags list
@@ -87,7 +104,7 @@ renderStationsList st =
   let
     sel  = listSelected (appStationsListState st)
     off  = listOffset (appStationsListState st)
-    stns = appStations st
+    stns = viewStations st
     focused = appFocus st == FocusStations
     -- Order: stations with known ping first (ascending), then unknown ping by name
     sorted  = sortStationsByPing stns
@@ -199,20 +216,46 @@ renderHelp st =
     focusHint = case appFocus st of
       FocusTags     -> "  [Tags]"
       FocusStations -> "  [Stations]"
+    filterHint = case appActiveFilter st of
+      Nothing -> ""
+      Just _  -> "  [filter: Esc to clear]"
   in
-    withAttr helpAttr (txt (base <> focusHint))
+    withAttr helpAttr (txt (base <> focusHint <> filterHint))
 
 --------------------------------------------------------------------------------
--- Search overlay
+-- Search prompt (full-width single-line banner at the top of the screen)
 --------------------------------------------------------------------------------
 
-renderSearch :: Text -> Widget AppName
-renderSearch currentText =
+-- | Render the search prompt as a single-line full-width bordered widget
+-- with the 'Search' label and a textual cursor at the given position.
+-- The cursor is rendered as a '|' character between the text's left
+-- and right halves; the layout is intentionally simple — brick's
+-- border widget sizes to its contents, and we omit width limits so the
+-- border stretches to the full terminal width.
+renderSearchPrompt :: Text -> Int -> Widget AppName
+renderSearchPrompt currentText cursor =
   withAttr searchAttr $
     B.borderWithLabel (txt " Search ") $
-    hLimit 60 $
-    vLimit 3 $
-    txt (" " <> currentText <> "|")
+    txt (insertCursor currentText cursor)
+
+-- | Insert a visible '|' cursor character at position @cursor@ in @t@.
+-- Cursor is clamped to @[0, Text.length t]@. An empty @t@ with cursor 0
+-- yields just "|" so the user always sees where they'll type.
+insertCursor :: Text -> Int -> Text
+insertCursor t cursor =
+  let len = Text.length t
+      pos = clamp 0 len cursor
+      (before, after) = Text.splitAt pos t
+  in before <> Text.singleton '|' <> after
+
+-- | Clamp @x@ to the inclusive range @[lo, hi]@. Local helper; mirrors
+-- the one in 'Tourne.TUI.Events' but is duplicated here so each module
+-- stays self-contained (small, pure, no need to share).
+clamp :: Int -> Int -> Int -> Int
+clamp lo hi x
+  | x < lo    = lo
+  | x > hi    = hi
+  | otherwise = x
 
 --------------------------------------------------------------------------------
 -- Utilities
@@ -222,3 +265,30 @@ truncateText :: Int -> Text -> Text
 truncateText n t
   | Text.length t > n = Text.take (n - 3) t <> "..."
   | otherwise         = t
+
+--------------------------------------------------------------------------------
+-- Station view (unfiltered or search-filtered)
+--------------------------------------------------------------------------------
+
+-- | The list of stations to display. Filter resolution:
+--   * If the search prompt is open (@appSearchText = Just q@), filter by
+--     @q@ — the user sees a live preview as they type.
+--   * Else if a filter is committed (@appActiveFilter = Just f@), filter
+--     by @f@ — the list stays filtered after the prompt is closed.
+--   * Else return the full unfiltered list.
+--
+-- The unfiltered source-of-truth (@appStations@) is never mutated by the
+-- search; this is a pure view, computed per render.
+viewStations :: AppState -> [Station]
+viewStations st = case appSearchText st <|> appActiveFilter st of
+  Nothing -> appStations st
+  Just q  -> filterStations (appStations st) q
+
+-- | Pure filter: case-insensitive substring match on station name.
+-- Empty query is a no-op (returns the input unchanged).
+filterStations :: [Station] -> Text -> [Station]
+filterStations stations query
+  | Text.null query = stations
+  | otherwise =
+    let lowerQuery = Text.toLower query
+    in filter (\s -> lowerQuery `Text.isInfixOf` Text.toLower (stationName s)) stations

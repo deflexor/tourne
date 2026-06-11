@@ -141,16 +141,32 @@ handleEvent ev = case ev of
 
   VtyEvent (Vty.EvKey key _mods) -> case key of
 
-    -- Quit on Escape (when not searching)
+    -- Escape: if the search prompt is open, close it (keep the
+    -- committed filter as-is). If no prompt but a filter is active,
+    -- clear the filter. Otherwise, quit.
     Vty.KEsc -> do
-      inSearch <- gets (isJust . appSearchText)
-      if inSearch
-        then modifySt $ \s -> s{ appSearchText = Nothing }
-        else halt
+      st <- get
+      case appSearchText st of
+        Just _  -> modifySt $ \s -> s{ appSearchText = Nothing }
+        Nothing -> case appActiveFilter st of
+          Just _  -> modifySt $ \s -> s{ appActiveFilter = Nothing
+                                       , appStationsListState = defaultListState
+                                       }
+          Nothing -> halt
 
-    -- Search mode: '/' toggles search
-    Vty.KChar '/' ->
-      modifySt $ \s -> s{ appSearchText = Just (fromMaybe "" (appSearchText s)) }
+    -- '/' (normal mode): open the search prompt, pre-filled with the
+    -- current active filter (so the user can edit the existing filter
+    -- or clear it by deleting the text and pressing Enter).
+    Vty.KChar '/' -> do
+      st <- get
+      case appSearchText st of
+        Just _  -> pure ()  -- already open; ignore
+        Nothing -> do
+          let initial = fromMaybe "" (appActiveFilter st)
+              initialLen = Text.length initial
+          modifySt $ \s -> s{ appSearchText   = Just initial
+                            , appSearchCursor = initialLen
+                            }
 
     _ -> do
       inSearch <- gets (isJust . appSearchText)
@@ -164,35 +180,80 @@ handleEvent ev = case ev of
 
 handleSearchKey :: Vty.Key -> EventM AppName AppState ()
 handleSearchKey key = case key of
+
+  -- Close the prompt; the committed filter is left unchanged.
   Vty.KEsc ->
-    modifySt $ \s -> s{ appSearchText = Nothing }
+    modifySt $ \s -> s{ appSearchText   = Nothing
+                      , appSearchCursor = 0
+                      }
 
-  Vty.KEnter ->
-    pure ()
+  -- Commit the prompt's text to the active filter and close the prompt.
+  -- Empty text means "clear the filter".
+  Vty.KEnter -> do
+    st <- get
+    let typed = fromMaybe "" (appSearchText st)
+    modifySt $ \s -> s
+      { appSearchText        = Nothing
+      , appSearchCursor      = 0
+      , appActiveFilter      = if Text.null typed then Nothing else Just typed
+      , appStationsListState = defaultListState
+      }
 
-  Vty.KBS ->
-    modifySt $ \s ->
-      let current = fromMaybe "" (appSearchText s)
-          newText = Text.dropEnd 1 current
-      in s{ appSearchText = Just newText }
+  -- Move the text cursor left/right.
+  Vty.KLeft  -> moveCursor (-1)
+  Vty.KRight -> moveCursor 1
 
+  -- Up/Down/j/k: navigate the (filtered) stations list. The list is
+  -- already filtered live by Draw.viewStations, so the normal navigation
+  -- helpers Just Work against the filtered view.
+  Vty.KUp       -> navigateVertical (-1)
+  Vty.KDown     -> navigateVertical 1
+  Vty.KChar 'k' -> navigateVertical (-1)
+  Vty.KChar 'j' -> navigateVertical 1
+
+  -- Backspace: delete the character before the cursor. If the cursor
+  -- is at position 0, this is a no-op.
+  Vty.KBS -> do
+    st <- get
+    let typed   = fromMaybe "" (appSearchText st)
+        cursor  = appSearchCursor st
+    if cursor <= 0
+      then pure ()
+      else let (before, after) = Text.splitAt cursor typed
+               -- drop the character immediately before the cursor
+               newText  = Text.dropEnd 1 before <> after
+               newCur   = cursor - 1
+           in modifySt $ \s -> s{ appSearchText   = Just newText
+                                , appSearchCursor = newCur
+                                }
+
+  -- Printable characters: insert at the cursor position.
   Vty.KChar c
-    | isPrint c ->
-        modifySt $ \s ->
-          let current = fromMaybe "" (appSearchText s)
-              newText = current <> Text.singleton c
-              filtered = filterStations (appStations s) newText
-          in s{ appSearchText = Just newText, appStations = filtered }
+    | isPrint c -> do
+        st <- get
+        let typed   = fromMaybe "" (appSearchText st)
+            cursor  = appSearchCursor st
+            (before, after) = Text.splitAt cursor typed
+            newText  = before <> Text.singleton c <> after
+            newCur   = cursor + 1
+        modifySt $ \s -> s{ appSearchText   = Just newText
+                          , appSearchCursor = newCur
+                          }
     | otherwise -> pure ()
 
   _ -> pure ()
 
-filterStations :: [Station] -> Text -> [Station]
-filterStations stations query
-  | Text.null query = stations
-  | otherwise =
-    let lowerQuery = Text.toLower query
-    in filter (\s -> lowerQuery `Text.isInfixOf` Text.toLower (stationName s)) stations
+-- | Move the search-prompt text cursor by @delta@, clamped to
+-- @[0, Text.length query]@. No-op if the prompt is closed.
+moveCursor :: Int -> EventM AppName AppState ()
+moveCursor delta = do
+  st <- get
+  case appSearchText st of
+    Nothing -> pure ()
+    Just q  ->
+      let len    = Text.length q
+          newCur = clamp 0 len (appSearchCursor st + delta)
+      in modifySt $ \s -> s{ appSearchCursor = newCur }
 
 --------------------------------------------------------------------------------
 -- Normal mode key handling

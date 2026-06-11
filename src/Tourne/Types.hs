@@ -178,6 +178,19 @@ data AppState = AppState
   , appPlayerState       :: !PlayerState
   , appFocus             :: !Focus
   , appSearchText        :: !(Maybe Text)
+  -- ^ In-prompt query text. @Just t@ while the search prompt is open;
+  --   @Nothing@ otherwise. Mutates on every printable keystroke /
+  --   backspace / arrow key.
+  , appSearchCursor      :: !Int
+  -- ^ Text-cursor position inside @appSearchText@. Only meaningful
+  --   when @appSearchText = Just _@. Range: @[0, Text.length q]@.
+  , appActiveFilter      :: !(Maybe Text)
+  -- ^ The committed station filter. @Just t@ = stations list is
+  --   filtered by @t@ (case-insensitive substring on station name);
+  --   @Nothing@ = unfiltered. Set by Enter in the search prompt
+  --   (or cleared by an empty query on Enter), and cleared by
+  --   Esc in normal mode. Independent of @appSearchText@ — the
+  --   active filter persists after the prompt is closed.
   , appAdState           :: !AdState
   , appFailoverState     :: !FailoverState
   , appStreamHealth      :: !StreamHealth
