@@ -52,7 +52,7 @@ main = do
     result <- RB.fetchTags cfg
     case result of
       Right tags -> writeBChan chan (EvTagsLoaded tags)
-      Left err   -> writeBChan chan (EvError (toText err))
+      Left err   -> writeBChan chan (EvError err)
 
   -- Always kick a background station refresh for the last selected
   -- tag, in case the cached list is stale. EvStationsLoaded will

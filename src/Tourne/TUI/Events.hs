@@ -13,6 +13,7 @@ import Brick.BChan (writeBChan)
 import Graphics.Vty qualified as Vty
 
 import Tourne.Types
+import Tourne.Error (renderError)
 import Tourne.RadioBrowser qualified as RB
 import Tourne.Persistence
   ( PersistedState (..), appToPersisted, savePersistedState )
@@ -105,8 +106,8 @@ handleEvent ev = case ev of
       schedulePersist
 
     EvError err ->
-      modifySt $ \s -> s{ appErrorMessage = Just err
-                        , appPlayerState = ErrorOccurred err
+      modifySt $ \s -> s{ appErrorMessage = Just (renderError err)
+                        , appPlayerState = ErrorOccurred (renderError err)
                         , appLoadingStations = False
                         }
 
@@ -390,7 +391,7 @@ handleSelect = do
               result <- RB.fetchStationsByTag cfg selectedTagName 100
               case result of
                 Right stations -> writeBChan chan (EvStationsLoaded stations)
-                Left err       -> writeBChan chan (EvError (toText err))
+                Left err       -> writeBChan chan (EvError err)
             Nothing -> pure ()
           schedulePersist
         else pure ()

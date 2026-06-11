@@ -20,6 +20,7 @@ import Data.Text qualified as Text
 import Network.HTTP.Types.Header (hUserAgent, HeaderName)
 import Network.HTTP.Types.URI (QueryItem)
 import Tourne.Config (Config, configApiBaseUrl)
+import Tourne.Error (AppError (..))
 import Tourne.Types
 import Tourne.Http (getSharedManager)
 
@@ -55,8 +56,9 @@ defaultQuery = StationQuery
 jsonHeader :: [(HeaderName, BS.ByteString)]
 jsonHeader = [(hUserAgent, "TourneRadio/0.1.0")]
 
--- | Make a GET request and parse JSON response
-apiGet :: FromJSON a => Text -> Text -> IO (Either Text a)
+-- | Make a GET request and parse JSON response. Distinguishes HTTP
+-- failures (network/TLS) from JSON parse failures.
+apiGet :: FromJSON a => Text -> Text -> IO (Either AppError a)
 apiGet base path = do
   let url = base <> path
   result <- try $ do
@@ -67,17 +69,17 @@ apiGet base path = do
     pure (Aeson.eitherDecode (HTTP.responseBody response))
   case result of
     Right (Right val) -> pure (Right val)
-    Right (Left parseErr) -> pure (Left ("JSON parse error: " <> toText parseErr))
-    Left (e :: SomeException) -> pure (Left (show e))
+    Right (Left parseErr) -> pure (Left (JsonParseError (toText parseErr)))
+    Left (e :: SomeException) -> pure (Left (HttpError (show e)))
 
 --------------------------------------------------------------------------------
 -- Tag fetching
 --------------------------------------------------------------------------------
 
 -- | Fetch all tags from the API
-fetchTags :: Config -> IO (Either Text [Tag])
+fetchTags :: Config -> IO (Either AppError [Tag])
 fetchTags cfg = do
-  result <- apiGet (configApiBaseUrl cfg) "/json/tags" :: IO (Either Text [Tag])
+  result <- apiGet (configApiBaseUrl cfg) "/json/tags" :: IO (Either AppError [Tag])
   case result of
     Right tags -> pure $ Right $ take 200 $ sortTags tags
     Left e     -> pure $ Left e
@@ -91,10 +93,10 @@ sortTags = sortOn (Down . tagStationCount)
 --------------------------------------------------------------------------------
 
 -- | Fetch stations by tag
-fetchStationsByTag :: Config -> Text -> Int -> IO (Either Text [Station])
+fetchStationsByTag :: Config -> Text -> Int -> IO (Either AppError [Station])
 fetchStationsByTag cfg tag limit = do
   let path = "/json/stations/bytag/" <> tag
-  result <- apiGet (configApiBaseUrl cfg) path :: IO (Either Text [Station])
+  result <- apiGet (configApiBaseUrl cfg) path :: IO (Either AppError [Station])
   case result of
     Right stations -> do
       let sortedStations = sortByClickCount stations
@@ -102,10 +104,10 @@ fetchStationsByTag cfg tag limit = do
     Left e -> pure $ Left e
 
 -- | Search stations by name
-searchStations :: Config -> Text -> IO (Either Text [Station])
+searchStations :: Config -> Text -> IO (Either AppError [Station])
 searchStations cfg query = do
   let path = "/json/stations/byname/" <> query
-  result <- apiGet (configApiBaseUrl cfg) path :: IO (Either Text [Station])
+  result <- apiGet (configApiBaseUrl cfg) path :: IO (Either AppError [Station])
   case result of
     Right stations -> pure $ Right $ sortByClickCount stations
     Left e         -> pure $ Left e

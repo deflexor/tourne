@@ -10,6 +10,7 @@ import System.Environment qualified as Env
 import Brick.BChan (BChan)
 import Tourne.Audio.Types (AudioCommand)
 import Tourne.Config (Config)
+import Tourne.Error (AppError)
 
 --------------------------------------------------------------------------------
 -- Configuration
@@ -303,7 +304,7 @@ data AppEvent
   | EvAdUpdate         !AdState
   | EvStationsLoaded   ![Station]
   | EvTagsLoaded       ![Tag]
-  | EvError            !Text
+  | EvError            !AppError
   | EvVolumeUpdate     !Double
   | EvShutdown
   | EvPersistNow
