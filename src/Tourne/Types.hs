@@ -1,7 +1,7 @@
 module Tourne.Types where
 
 import Relude
-import Data.Aeson (FromJSON)
+import Data.Aeson (FromJSON, ToJSON, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Text qualified as Text
 import Data.Char (toLower)
@@ -29,6 +29,15 @@ debugEnabled = unsafePerformIO do
 newtype StationId = StationId { unStationId :: Text }
   deriving (Eq, Ord, Show, Generic)
 
+-- | Custom JSON instances for StationId. The newtype unwraps to a
+-- bare JSON string in both directions, matching how the radio-browser
+-- API emits the field and how we want the cached state file to look.
+-- (The default Generic-derived instances would produce
+-- @{"unStationId":"abc-123"}@ instead, breaking API parsing and
+-- making the cached file harder to read.)
+instance ToJSON StationId where
+  toJSON (StationId t) = Aeson.toJSON t
+
 instance FromJSON StationId where
   parseJSON v = StationId <$> Aeson.parseJSON v
 
@@ -49,6 +58,23 @@ data Station = Station
   , stationClickCount  :: !(Maybe Int)
   } deriving (Eq, Ord, Show, Generic)
 
+-- | Custom ToJSON to keep field names aligned with the radio-browser
+-- API (e.g. "stationuuid", "name", "url", "tags", "bitrate", etc.)
+-- and with the manual FromJSON instance below. The single field
+-- "tags" stores a space-joined string to match the API shape.
+instance ToJSON Station where
+  toJSON Station{..} = Aeson.object
+    [ "stationuuid" Aeson..= stationId
+    , "name"        Aeson..= stationName
+    , "url"         Aeson..= stationUrl
+    , "tags"        Aeson..= Text.unwords stationTags
+    , "bitrate"     Aeson..= stationBitrate
+    , "codec"       Aeson..= stationCodec
+    , "country"     Aeson..= stationCountry
+    , "language"    Aeson..= stationLanguage
+    , "clickcount"  Aeson..= stationClickCount
+    ]
+
 instance FromJSON Station where
   parseJSON = Aeson.withObject "Station" \o -> do
     stationId        <- o Aeson..: "stationuuid"
@@ -68,6 +94,16 @@ data Tag = Tag
   { tagName         :: !Text
   , tagStationCount :: !Int
   } deriving (Eq, Ord, Show, Generic)
+
+-- | Custom ToJSON to keep field names aligned with the radio-browser
+-- API ("name", "stationcount") and with the manual FromJSON instance
+-- below. This way state.json files round-trip cleanly and a user
+-- who inspects the saved file sees familiar field names.
+instance ToJSON Tag where
+  toJSON Tag{..} = Aeson.object
+    [ "name" Aeson..= tagName
+    , "stationcount" Aeson..= tagStationCount
+    ]
 
 instance FromJSON Tag where
   parseJSON = Aeson.withObject "Tag" \o -> do
@@ -101,25 +137,25 @@ data PlayerState
   | Playing        !Double        -- ^ current volume level (0-1)
   | Paused
   | ErrorOccurred  !Text
-  deriving (Eq, Show, Generic)
+  deriving (Eq, Show, Generic, ToJSON, FromJSON)
 
 data StreamHealth
   = StreamGood
   | StreamDegraded !Text
   | StreamLost     !Text
-  deriving (Eq, Show, Generic)
+  deriving (Eq, Show, Generic, ToJSON, FromJSON)
 
 data AdState
   = AdInactive
   | AdMonitoring   !Double
   | AdDetected     !Double
-  deriving (Eq, Show, Generic)
+  deriving (Eq, Show, Generic, ToJSON, FromJSON)
 
 data FailoverState
   = FailoverInactive
   | FailoverPreparing !StationId
   | FailoverSwitching !StationId
-  deriving (Eq, Show, Generic)
+  deriving (Eq, Show, Generic, ToJSON, FromJSON)
 
 --------------------------------------------------------------------------------
 -- UI focus
@@ -128,7 +164,7 @@ data FailoverState
 data Focus
   = FocusTags
   | FocusStations
-  deriving (Eq, Ord, Show, Generic)
+  deriving (Eq, Ord, Show, Generic, ToJSON, FromJSON)
 
 --------------------------------------------------------------------------------
 -- Global application state
@@ -154,13 +190,27 @@ data AppState = AppState
   , appLoadingStations   :: !Bool
   , appAudioCommand      :: !(Maybe (AudioCommand -> IO ()))
   , appStationsVar       :: !(Maybe (TVar [Station]))
+  , appWasPlaying        :: !Bool
+  -- ^ True iff the user exited while a station was selected for playback.
+  --   Used to decide whether to auto-resume on next launch. Independent of
+  --   transient PlayerState (which can be Stopped right after CmdPlay fails).
+  , appResumePending     :: !Bool
+  -- ^ True if we should auto-fire CmdPlay on the next EvStationsLoaded
+  --   (if the previously selected station is present in the list).
+  --   Cleared after the resume fires, when the user changes tag, or
+  --   when the user explicitly stops playback.
+  , appStationsByTag     :: !(HashMap Text [Station])
+  -- ^ Runtime cache of fetched stations keyed by tag name. Used to
+  --   save per-tag station lists on shutdown and to seed the
+  --   initial stations list for the previously selected tag on
+  --   the next launch.
   }
 
 data ListState = ListState
   { listSelected   :: !Int
   , listOffset     :: !Int
   , listSize       :: !Int
-  } deriving (Eq, Show, Generic)
+  } deriving (Eq, Show, Generic, ToJSON, FromJSON)
 
 defaultListState :: ListState
 defaultListState = ListState 0 0 0
@@ -182,4 +232,8 @@ data AppEvent
   | EvError            !Text
   | EvVolumeUpdate     !Double
   | EvShutdown
+  | EvPersistNow
+  -- ^ Triggered by the TUI when state has changed in a way worth
+  --   persisting (selection, playback, volume, focus, tag change).
+  --   Handler reads current AppState and writes a snapshot to disk.
   deriving (Eq, Show, Generic)

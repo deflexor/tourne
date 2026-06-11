@@ -4,16 +4,15 @@ module Tourne.TUI.App
   ) where
 
 import Relude
+import Data.HashMap.Strict qualified as HashMap
 import Brick.Main
-  ( App(..), neverShowCursor, halt )
-import Brick.Types
-  ( Widget, EventM, ViewportType(..), BrickEvent(..) )
+  ( App(..), neverShowCursor )
 import Brick.AttrMap (AttrMap, attrMap)
 import Graphics.Vty qualified as Vty
 import Graphics.Vty.Attributes (defAttr, withForeColor, withBackColor)
 
 import Tourne.Types
-import Tourne.Config
+import Tourne.Persistence (PersistedState (..))
 import Tourne.TUI.Core
 import Tourne.TUI.Draw (drawUI)
 import Tourne.TUI.Events (handleEvent)
@@ -23,28 +22,45 @@ import Brick.BChan (BChan)
 -- Initial app state
 --------------------------------------------------------------------------------
 
-initialAppState :: Config -> Maybe (BChan AppEvent) -> IO AppState
-initialAppState cfg mChan = pure AppState
-  { appTags             = []
-  , appStations         = []
-  , appCurrentTag       = Nothing
-  , appSelectedStation  = Nothing
-  , appPlayerState      = Stopped
-  , appFocus            = FocusTags
-  , appSearchText       = Nothing
-  , appAdState          = AdInactive
-  , appFailoverState    = FailoverInactive
-  , appStreamHealth     = StreamGood
-  , appErrorMessage     = Nothing
-  , appPingResults      = mempty
-  , appVolume           = configPlayerVolume cfg
-  , appTagsListState    = defaultListState
-  , appStationsListState = defaultListState
-  , appEventChan        = mChan
-  , appLoadingStations  = False
-  , appAudioCommand     = Nothing
-  , appStationsVar      = Nothing
+-- | Build the initial AppState. Tags, stations, and navigation state
+-- are seeded from the persisted snapshot (if any) so the user sees
+-- the same view they left on the previous run. Runtime-only fields
+-- (event channel, command sink, TVars) are left as their default
+-- 'Nothing' values and populated by 'Main' before the app launches.
+initialAppState :: Maybe (BChan AppEvent) -> PersistedState -> IO AppState
+initialAppState mChan persisted = pure AppState
+  { appTags              = psTags persisted
+  , appStations          = initialStations persisted
+  , appCurrentTag        = psCurrentTag persisted
+  , appSelectedStation   = psSelectedStation persisted
+  , appPlayerState       = Stopped
+  , appFocus             = psFocus persisted
+  , appSearchText        = Nothing
+  , appAdState           = AdInactive
+  , appFailoverState     = FailoverInactive
+  , appStreamHealth      = StreamGood
+  , appErrorMessage      = Nothing
+  , appPingResults       = mempty
+  , appVolume            = psVolume persisted
+  , appTagsListState     = psTagsCursor persisted
+  , appStationsListState = psStationsCursor persisted
+  , appEventChan         = mChan
+  , appLoadingStations   = False
+  , appAudioCommand      = Nothing
+  , appStationsVar       = Nothing
+  , appWasPlaying        = psWasPlaying persisted
+  , appResumePending     = psWasPlaying persisted
+  , appStationsByTag     = psStationsByTag persisted
   }
+
+-- | If we have a cached station list for the last selected tag, use
+-- it as the initial stations list so the user sees the same stations
+-- immediately. Otherwise leave empty (the user will need to pick a
+-- tag, or Main.hs will trigger a background refresh).
+initialStations :: PersistedState -> [Station]
+initialStations ps = case psCurrentTag ps of
+  Nothing -> []
+  Just tag -> fromMaybe [] (HashMap.lookup tag (psStationsByTag ps))
 
 --------------------------------------------------------------------------------
 -- Brick App definition

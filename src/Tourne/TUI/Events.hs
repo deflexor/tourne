@@ -14,6 +14,8 @@ import Graphics.Vty qualified as Vty
 
 import Tourne.Types
 import Tourne.RadioBrowser qualified as RB
+import Tourne.Persistence
+  ( PersistedState (..), appToPersisted, savePersistedState )
 import Tourne.TUI.Core (AppName(..))
 import Tourne.Audio.Types (AudioCommand(..))
 
@@ -55,18 +57,52 @@ handleEvent ev = case ev of
       modifySt $ \s -> s{ appAdState = adState }
 
     EvStationsLoaded stations -> do
-      modifySt $ \s -> s{ appStations = stations
-                        , appStationsListState = defaultListState
-                        , appErrorMessage = Nothing
-                        , appLoadingStations = False
-                        }
+      -- Auto-resume: if startup-time resume is pending and the
+      -- previously selected station is in the freshly loaded list,
+      -- fire CmdPlay immediately. Then clear the pending flag so
+      -- future EvStationsLoaded (e.g. user navigates to a new tag)
+      -- don't re-trigger it.
+      st0 <- get
+      let shouldResume    = appResumePending st0
+          mSelected       = appSelectedStation st0
+          mResumeUrl      = psResumeStationUrl (appToPersisted st0)
+      modifySt $ \s -> s
+        { appStations          = stations
+        , appStationsListState = defaultListState
+        , appErrorMessage      = Nothing
+        , appLoadingStations   = False
+        , appStationsByTag     = case appCurrentTag s of
+            Nothing -> appStationsByTag s
+            Just t  -> HashMap.insert t stations (appStationsByTag s)
+        }
+      case (shouldResume, mSelected, mResumeUrl) of
+        (True, Just sid, Just url) -> case find (\st -> stationId st == sid) stations of
+          Just stn
+            | stationUrl stn == url -> do
+                modifySt $ \s -> s
+                  { appResumePending = False
+                  , appPlayerState   = Connecting (stationUrl stn)
+                  }
+                sendCmd (CmdPlay (stationUrl stn))
+            | otherwise ->
+                -- Cached URL doesn't match any loaded station; abort
+                -- the resume attempt so we don't re-fire on every load.
+                modifySt $ \s -> s{ appResumePending = False }
+          Nothing ->
+            -- Selected station not in this list (different tag?).
+            -- Defer: don't fire resume, leave pending true so the
+            -- next EvStationsLoaded (for the right tag) gets a chance.
+            pure ()
+        _ -> pure ()
       mVar <- gets appStationsVar
       case mVar of
         Just tv -> liftIO $ STM.atomically $ STM.writeTVar tv stations
         Nothing -> pure ()
+      schedulePersist
 
-    EvTagsLoaded tags ->
+    EvTagsLoaded tags -> do
       modifySt $ \s -> s{ appTags = tags }
+      schedulePersist
 
     EvError err ->
       modifySt $ \s -> s{ appErrorMessage = Just err
@@ -74,11 +110,27 @@ handleEvent ev = case ev of
                         , appLoadingStations = False
                         }
 
-    EvVolumeUpdate vol ->
+    EvVolumeUpdate vol -> do
       modifySt $ \s -> s{ appVolume = vol }
+      schedulePersist
 
-    EvShutdown ->
+    EvShutdown -> do
+      -- Record the user's "was playing" intent based on current state,
+      -- then save. The saved snapshot is what the next launch will
+      -- restore from.
+      st <- get
+      let wasPlaying = case appPlayerState st of
+            Playing _      -> True
+            Paused         -> True
+            Buffering _ _  -> True
+            _              -> False
+      modifySt $ \s -> s{ appWasPlaying = wasPlaying }
+      schedulePersist
       halt
+
+    EvPersistNow -> do
+      st <- get
+      liftIO $ void $ savePersistedState (appToPersisted st)
 
   -------------------------------------------------------------------
   -- Vty events (keyboard/mouse)
@@ -163,12 +215,13 @@ handleNormalKey key = case key of
   Vty.KPageUp -> navigatePage (-10)
   Vty.KPageDown -> navigatePage 10
 
-  Vty.KChar '\t' ->
+  Vty.KChar '\t' -> do
     modifySt $ \s ->
       let newFocus = case appFocus s of
             FocusTags     -> FocusStations
             FocusStations -> FocusTags
       in s{ appFocus = newFocus, appErrorMessage = Nothing }
+    schedulePersist
 
   Vty.KEnter -> handleSelect
   Vty.KChar ' ' -> handleSelect
@@ -180,25 +233,36 @@ handleNormalKey key = case key of
     case mSid of
       Just sid -> case find (\s -> stationId s == sid) stations of
         Just stn -> do
-          modifySt $ \s -> s{ appPlayerState = Connecting (stationUrl stn) }
+          modifySt $ \s -> s
+            { appPlayerState   = Connecting (stationUrl stn)
+            , appResumePending = False  -- explicit user action, no auto-resume
+            }
           sendCmd (CmdPlay (stationUrl stn))
+          schedulePersist
         Nothing -> pure ()
       Nothing -> pure ()
 
   -- Stop
   Vty.KChar 's' -> do
-    modifySt $ \s -> s{ appPlayerState = Stopped, appSelectedStation = Nothing }
+    modifySt $ \s -> s
+      { appPlayerState   = Stopped
+      , appSelectedStation = Nothing
+      , appResumePending = False  -- user explicitly stopped
+      }
     sendCmd CmdStop
+    schedulePersist
 
   -- Volume
   Vty.KChar '+' -> do
     modifySt $ \s -> s{ appVolume = min 1.0 (appVolume s + 0.1) }
     vol <- gets appVolume
     sendCmd (CmdVolume vol)
+    schedulePersist
   Vty.KChar '-' -> do
     modifySt $ \s -> s{ appVolume = max 0.0 (appVolume s - 0.1) }
     vol <- gets appVolume
     sendCmd (CmdVolume vol)
+    schedulePersist
 
   -- Refresh
   Vty.KChar 'r' -> pure ()
@@ -231,6 +295,7 @@ handleSelect = do
           modifySt $ \s -> s{ appCurrentTag = Just selectedTagName
                             , appErrorMessage = Nothing
                             , appLoadingStations = True
+                            , appResumePending = False  -- user moved on
                             }
           -- Fetch stations for the selected tag in background
           mChan <- gets appEventChan
@@ -241,6 +306,7 @@ handleSelect = do
                 Right stations -> writeBChan chan (EvStationsLoaded stations)
                 Left err       -> writeBChan chan (EvError (toText err))
             Nothing -> pure ()
+          schedulePersist
         else pure ()
 
     FocusStations -> do
@@ -254,8 +320,10 @@ handleSelect = do
           modifySt $ \s -> s
             { appSelectedStation = Just (stationId station)
             , appPlayerState = Connecting (stationUrl station)
+            , appResumePending = False  -- explicit user action
             }
           sendCmd (CmdPlay (stationUrl station))
+          schedulePersist
         else pure ()
 
 --------------------------------------------------------------------------------
@@ -287,6 +355,7 @@ navigateVertical delta = do
           newIdx = clamp 0 maxIdx (listSelected listState + delta)
           newOffset = updateOffset (listOffset listState) newIdx visibleCount
       modifySt $ \s -> s{ appStationsListState = listState{ listSelected = newIdx, listOffset = newOffset } }
+  schedulePersist
 
 navigateHome :: EventM AppName AppState ()
 navigateHome = do
@@ -294,6 +363,7 @@ navigateHome = do
   case focus of
     FocusTags     -> modifySt $ \s -> s{ appTagsListState = (appTagsListState s){ listSelected = 0, listOffset = 0 } }
     FocusStations -> modifySt $ \s -> s{ appStationsListState = (appStationsListState s){ listSelected = 0, listOffset = 0 } }
+  schedulePersist
 
 navigateEnd :: EventM AppName AppState ()
 navigateEnd = do
@@ -309,6 +379,7 @@ navigateEnd = do
         let mx = max 0 (length (appStations s) - 1)
             off = max 0 (mx - visibleCount + 1)
         in s{ appStationsListState = (appStationsListState s){ listSelected = mx, listOffset = off } }
+  schedulePersist
 
 navigatePage :: Int -> EventM AppName AppState ()
 navigatePage delta = do
@@ -328,6 +399,7 @@ navigatePage delta = do
           newIdx = clamp 0 maxIdx (listSelected listState + delta)
           newOffset = updateOffset (listOffset listState) newIdx visibleCount
       modifySt $ \s -> s{ appStationsListState = listState{ listSelected = newIdx, listOffset = newOffset } }
+  schedulePersist
 
 --------------------------------------------------------------------------------
 -- Utilities
@@ -353,3 +425,19 @@ modifySt f = get >>= put . f
 -- | Check if a character is printable
 isPrint :: Char -> Bool
 isPrint c = c >= ' ' && c <= '~'
+
+--------------------------------------------------------------------------------
+-- Persistence
+--------------------------------------------------------------------------------
+
+-- | Trigger an EvPersistNow via the event channel so a save happens
+-- shortly. Falls back to a direct save if the channel isn't wired up
+-- (which would only happen in misconfigured test setups).
+schedulePersist :: EventM AppName AppState ()
+schedulePersist = do
+  mChan <- gets appEventChan
+  case mChan of
+    Just chan -> liftIO $ void $ writeBChan chan EvPersistNow
+    Nothing   -> do
+      st <- get
+      liftIO $ void $ savePersistedState (appToPersisted st)

@@ -15,7 +15,10 @@ import Tourne.Config
 import Tourne.RadioBrowser qualified as RB
 import Tourne.AdDetection qualified as AD
 import Tourne.Audio.Player qualified as Audio
--- import Tourne.PingChecker qualified as Ping
+import Tourne.Persistence
+  ( PersistedState (..), loadPersistedState, savePersistedState
+  , appToPersisted
+  )
 import Tourne.TUI.App qualified as TUI
 
 --------------------------------------------------------------------------------
@@ -37,12 +40,29 @@ main = do
   -- Initialize ad detector
   _adDetector <- AD.initAdDetector
 
-  -- Fetch initial tags in background
+  -- Load persisted state (tags, last selected tag/station, volume,
+  -- focus, cursors). On any read failure this falls back to an
+  -- empty state with a notice on stderr.
+  persisted <- loadPersistedState
+
+  -- Always kick a background tag refresh so the list stays current,
+  -- but the UI shows the cached tags immediately on the first frame.
   _ <- forkIO $ do
     result <- RB.fetchTags
     case result of
       Right tags -> writeBChan chan (EvTagsLoaded tags)
       Left err   -> writeBChan chan (EvError (toText err))
+
+  -- Always kick a background station refresh for the last selected
+  -- tag, in case the cached list is stale. EvStationsLoaded will
+  -- trigger the auto-resume if appropriate.
+  case psCurrentTag persisted of
+    Just tag -> void $ forkIO $ do
+      result <- RB.fetchStationsByTag tag (configMaxStations cfg)
+      case result of
+        Right stations -> writeBChan chan (EvStationsLoaded stations)
+        Left _         -> pure ()  -- keep cached list on failure
+    Nothing -> pure ()
 
   -- Install signal handlers for graceful shutdown
   _ <- installHandler sigINT  (Catch (writeBChan chan EvShutdown)) Nothing
@@ -55,8 +75,9 @@ main = do
   -- _pingHandle <- Ping.startPingChecker cfg stationsVar
   --   (\sid result -> writeBChan chan (EvPingUpdate sid result))
 
-  -- Create initial app state (with reference to event channel)
-  initialState <- TUI.initialAppState cfg (Just chan)
+  -- Create initial app state (with reference to event channel), seeded
+  -- from the persisted snapshot.
+  initialState <- TUI.initialAppState (Just chan) persisted
   let initialState' = initialState
         { appAudioCommand = Just (Audio.audioCommand audioEngine)
         , appStationsVar  = Just stationsVar
@@ -68,8 +89,16 @@ main = do
   -- Start background audio state monitor
   _ <- forkIO $ audioMonitorLoop audioEngine chan
 
-  -- Run the Brick app (brick-2.12 API)
-  _finalState <- customMain vty (pure vty) (Just chan) TUI.app initialState'
+  -- Run the Brick app (brick-2.12 API). customMain returns the final
+  -- AppState; we use it for one last persist call as a safety net
+  -- in case the user killed the process with a signal we didn't
+  -- handle (the SIGINT/SIGTERM handler fires EvShutdown which already
+  -- saves; this is just defense in depth).
+  finalState <- customMain vty (pure vty) (Just chan) TUI.app initialState'
+
+  -- Best-effort final save. The in-app EvShutdown handler should
+  -- already have saved, but this catches any other exit path.
+  _ <- savePersistedState (appToPersisted finalState)
 
   -- Cleanup
   Audio.closeAudio audioEngine

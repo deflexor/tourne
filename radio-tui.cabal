@@ -41,6 +41,7 @@ library
     Tourne.Http
     Tourne.RadioBrowser
     Tourne.PingChecker
+    Tourne.Persistence
     Tourne.AdDetection
     Tourne.Failover
     Tourne.Audio.Types
@@ -98,3 +99,6 @@ executable tourne
     , vty-crossplatform
     , stm
     , unix
+    , aeson
+    , bytestring
+    , directory
