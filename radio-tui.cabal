@@ -36,6 +36,7 @@ library
   hs-source-dirs: src
   exposed-modules:
     Tourne
+    Tourne.Error
     Tourne.Types
     Tourne.Config
     Tourne.Http
@@ -112,6 +113,7 @@ test-suite tourne-test
     Tourne.Test.Sorting
     Tourne.Test.Persistence
     Tourne.Test.Mpg123
+    Tourne.Test.Error
     Tourne.Test.Util
   build-depends:
     , base
