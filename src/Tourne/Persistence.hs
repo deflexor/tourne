@@ -43,6 +43,7 @@ import System.IO.Error (tryIOError)
 
 import Tourne.Types
   ( AppState (..), Focus (..), ListState (..), Station (..), StationId, Tag
+  , StationSortMode (..)
   )
 
 --------------------------------------------------------------------------------
@@ -67,14 +68,41 @@ data PersistedState = PersistedState
   , psResumeStationUrl :: !(Maybe Text) -- ^ Cached URL of the playing station
                                           --   (so resume can work even if
                                           --   the stations list is empty)
+  , psStationSort      :: !StationSortMode -- ^ User-selected stations sort mode
   } deriving (Eq, Show, Generic)
 
 instance Aeson.ToJSON PersistedState
-instance Aeson.FromJSON PersistedState
+
+-- | Custom 'FromJSON' for forward compatibility.
+--
+-- Notes:
+--   * The Generic-derived 'ToJSON' encodes field names verbatim
+--     (e.g. @"psVersion"@, @"psCurrentTag"@), so the keys below match
+--     the on-disk format produced by previous versions.
+--   * The 'psStationSort' field was added in schema v2; older v1
+--     state files do not have it, so we use '.:?' to fall back to
+--     'SortByName' when missing. This keeps existing v1 cache files
+--     loadable after upgrade.
+instance Aeson.FromJSON PersistedState where
+  parseJSON = Aeson.withObject "PersistedState" \o -> do
+    psVersion          <- o Aeson..: "psVersion"
+    psTags             <- o Aeson..:  "psTags"
+    psStationsByTag    <- o Aeson..:  "psStationsByTag"
+    psCurrentTag       <- o Aeson..:  "psCurrentTag"
+    psSelectedStation  <- o Aeson..:  "psSelectedStation"
+    psVolume           <- o Aeson..:  "psVolume"
+    psFocus            <- o Aeson..:  "psFocus"
+    psTagsCursor       <- o Aeson..:  "psTagsCursor"
+    psStationsCursor   <- o Aeson..:  "psStationsCursor"
+    psWasPlaying       <- o Aeson..:  "psWasPlaying"
+    psResumeStationUrl <- o Aeson..:  "psResumeStationUrl"
+    psStationSort      <- o Aeson..:? "psStationSort" Aeson..!= SortByName
+    pure PersistedState{..}
 
 -- | Schema version constant. Bump if PersistedState's shape changes.
+-- v2 adds 'psStationSort' (with backward-compatible parsing).
 currentSchemaVersion :: Int
-currentSchemaVersion = 1
+currentSchemaVersion = 2
 
 -- | Default empty state used both as a safe fallback when the file is
 -- missing/malformed and as the initial value for a fresh install.
@@ -91,6 +119,7 @@ defaultPersistedState = PersistedState
   , psStationsCursor   = ListState 0 0 0
   , psWasPlaying       = False
   , psResumeStationUrl = Nothing
+  , psStationSort      = SortByName
   }
 
 -- | Alias for defaultPersistedState for clarity at call sites.
@@ -118,10 +147,15 @@ encodePersistedState = Aeson.encode
 -- | Parse a PersistedState from JSON bytes.
 -- Returns 'Left' with an error message on failure (e.g. corrupt file,
 -- version mismatch, missing required fields).
+--
+-- Schema v1 files (no 'stationSort' field) are accepted for backward
+-- compatibility: the custom 'FromJSON' instance defaults
+-- 'psStationSort' to 'SortByName' when the field is missing.
 decodePersistedState :: BSL.ByteString -> Either Text PersistedState
 decodePersistedState bs = case Aeson.eitherDecode bs of
   Right s
     | psVersion s == currentSchemaVersion -> Right s
+    | psVersion s == currentSchemaVersion - 1 -> Right s
     | otherwise -> Left
         ("unsupported schema version: " <> show (psVersion s))
   Left err -> Left (toText err)
@@ -202,6 +236,7 @@ appToPersisted s = PersistedState
   , psStationsCursor   = appStationsListState s
   , psWasPlaying       = appWasPlaying s
   , psResumeStationUrl = resumeUrl
+  , psStationSort      = appStationSort s
   }
   where
     -- Cache the URL of the currently selected station so resume can

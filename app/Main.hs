@@ -15,6 +15,7 @@ import Tourne.Config
 import Tourne.RadioBrowser qualified as RB
 import Tourne.AdDetection qualified as AD
 import Tourne.Audio.Player qualified as Audio
+import Tourne.PingChecker (startPingChecker, stopPingChecker)
 import Tourne.Persistence
   ( PersistedState (..), loadPersistedState, savePersistedState
   , appToPersisted
@@ -71,9 +72,14 @@ main = do
   -- Create stations TVar for PingChecker
   stationsVar <- STM.newTVarIO []
 
-  -- Start background ping checker
-  -- _pingHandle <- Ping.startPingChecker cfg stationsVar
-  --   (\sid result -> writeBChan chan (EvPingUpdate sid result))
+  -- Start background ping checker. Pings are issued in batches of
+  -- configPingBatchSize stations every configPingIntervalSeconds seconds,
+  -- with a per-request response timeout of configPingResponseTimeout
+  -- seconds. Results are routed through the Brick event channel as
+  -- EvPingUpdate, which the TUI handler turns into appPingResults and
+  -- per-station stationPing values (used by sorting and failover).
+  pingHandle <- startPingChecker cfg stationsVar
+    (\sid result -> writeBChan chan (EvPingUpdate sid result))
 
   -- Create initial app state (with reference to event channel), seeded
   -- from the persisted snapshot.
@@ -99,6 +105,10 @@ main = do
   -- Best-effort final save. The in-app EvShutdown handler should
   -- already have saved, but this catches any other exit path.
   _ <- savePersistedState (appToPersisted finalState)
+
+  -- Stop the ping checker thread (it sets its cancel flag and cancels
+  -- the async, so the thread is joined before we tear down audio).
+  stopPingChecker pingHandle
 
   -- Cleanup
   Audio.closeAudio audioEngine

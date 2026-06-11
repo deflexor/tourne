@@ -53,6 +53,7 @@ initialAppState mChan persisted = pure AppState
   , appWasPlaying        = psWasPlaying persisted
   , appResumePending     = psWasPlaying persisted
   , appStationsByTag     = psStationsByTag persisted
+  , appStationSort       = psStationSort persisted
   }
 
 -- | If we have a cached station list for the last selected tag, use

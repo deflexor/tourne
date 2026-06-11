@@ -115,16 +115,67 @@ instance FromJSON Tag where
 -- Sorting
 --------------------------------------------------------------------------------
 
--- | Order stations for display: known ping first (ascending), then unknown
--- ping sorted by name. Shared by the renderer (Draw) and the selection
--- handler (Events) so both always agree on order.
-sortStationsByPing :: [Station] -> [Station]
-sortStationsByPing = sortBy \a b ->
-  case (stationPing a, stationPing b) of
-    (Nothing, Nothing) -> compare (stationName a) (stationName b)
-    (Nothing, Just _)  -> GT
-    (Just _, Nothing)  -> LT
-    (Just pa, Just pb) -> compare pa pb
+-- | How the stations list is ordered. Selected by the user with the
+-- 'o' key; defaults to 'SortByName' so the list is stable while
+-- background ping results stream in.
+data StationSortMode
+  = SortByName
+  | SortByBitrate
+  | SortByPing
+  deriving (Eq, Ord, Show, Generic)
+
+instance ToJSON StationSortMode where
+  toJSON = Aeson.toJSON . sortModeToText
+    where
+      sortModeToText :: StationSortMode -> Text
+      sortModeToText SortByName    = "name"
+      sortModeToText SortByBitrate = "bitrate"
+      sortModeToText SortByPing    = "ping"
+
+instance FromJSON StationSortMode where
+  parseJSON = Aeson.withText "StationSortMode" \t ->
+    case Text.toLower t of
+      "name"    -> pure SortByName
+      "bitrate" -> pure SortByBitrate
+      "ping"    -> pure SortByPing
+      _         -> fail ("unknown StationSortMode: " <> toString t)
+
+-- | Cycle to the next sort mode. Used by the 'o' key.
+nextSortMode :: StationSortMode -> StationSortMode
+nextSortMode SortByName    = SortByBitrate
+nextSortMode SortByBitrate = SortByPing
+nextSortMode SortByPing    = SortByName
+
+-- | Short human label for the active sort mode, used in the UI
+-- header and the help line.
+sortModeLabel :: StationSortMode -> Text
+sortModeLabel SortByName    = "name"
+sortModeLabel SortByBitrate = "bitrate"
+sortModeLabel SortByPing    = "ping"
+
+-- | Order stations for display according to the active sort mode.
+-- Shared by the renderer (Draw) and the selection handler (Events)
+-- so both always agree on order. Pure: same input -> same output.
+--
+-- Mode semantics:
+--   * 'SortByName'    — alphabetical by station name, stable.
+--   * 'SortByBitrate' — highest bitrate first; missing bitrate
+--                       sorts to the end; ties broken by name.
+--   * 'SortByPing'    — known ping first (ascending), unknown
+--                       ping at the end sorted by name.
+sortStations :: StationSortMode -> [Station] -> [Station]
+sortStations mode = case mode of
+  SortByName    -> sortBy (comparing stationName)
+  SortByBitrate -> sortBy \a b ->
+    let ka = fromMaybe 0 (stationBitrate a)
+        kb = fromMaybe 0 (stationBitrate b)
+    in compare kb ka <> compare (stationName a) (stationName b)
+  SortByPing    -> sortBy \a b ->
+    case (stationPing a, stationPing b) of
+      (Nothing, Nothing) -> compare (stationName a) (stationName b)
+      (Nothing, Just _)  -> GT
+      (Just _, Nothing)  -> LT
+      (Just pa, Just pb) -> compare pa pb
 
 --------------------------------------------------------------------------------
 -- Player state
@@ -217,6 +268,11 @@ data AppState = AppState
   --   save per-tag station lists on shutdown and to seed the
   --   initial stations list for the previously selected tag on
   --   the next launch.
+  , appStationSort       :: !StationSortMode
+  -- ^ How the stations list is currently ordered. User-toggled with
+  --   the 'o' key. Persisted across launches (see PersistedState).
+  --   Defaults to 'SortByName' so the list is stable while
+  --   background ping results stream in.
   }
 
 data ListState = ListState

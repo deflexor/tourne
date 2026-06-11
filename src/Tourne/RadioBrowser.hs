@@ -95,7 +95,7 @@ fetchStationsByTag tag limit = do
   result <- apiGet path :: IO (Either Text [Station])
   case result of
     Right stations -> do
-      let sortedStations = sortStations stations
+      let sortedStations = sortByClickCount stations
       pure $ Right $ take limit sortedStations
     Left e -> pure $ Left e
 
@@ -105,10 +105,12 @@ searchStations query = do
   let path = "/json/stations/byname/" <> query
   result <- apiGet path :: IO (Either Text [Station])
   case result of
-    Right stations -> pure $ Right $ sortStations stations
+    Right stations -> pure $ Right $ sortByClickCount stations
     Left e         -> pure $ Left e
 
 -- | Sort stations by click count (descending); stations with no click count
--- are treated as 0 so they sort last.
-sortStations :: [Station] -> [Station]
-sortStations = sortOn (Down . fromMaybe 0 . stationClickCount)
+-- are treated as 0 so they sort last. This is the API-result sort
+-- applied at fetch time and is independent of the user-toggled
+-- display sort mode (see 'Tourne.Types.sortStations').
+sortByClickCount :: [Station] -> [Station]
+sortByClickCount = sortOn (Down . fromMaybe 0 . stationClickCount)

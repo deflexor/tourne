@@ -56,15 +56,16 @@ cabal run tourne
 
 ## Controls
 
-| Key         | Action                         |
-|-------------|--------------------------------|
-| `Tab`       | Switch focus (tags ↔ stations) |
-| `↑` / `↓`  | Navigate list                  |
-| `Enter`     | Play selected station          |
-| `Space`     | Pause/resume                   |
-| `+` / `-`   | Volume up/down                 |
-| `/`         | Search stations                |
-| `q` / `Esc` | Quit                           |
+| Key         | Action                                            |
+|-------------|---------------------------------------------------|
+| `Tab`       | Switch focus (tags ↔ stations)                    |
+| `↑` / `↓`  | Navigate list                                     |
+| `Enter`     | Play selected station                             |
+| `Space`     | Pause/resume                                      |
+| `+` / `-`   | Volume up/down                                    |
+| `/`         | Search stations                                   |
+| `o`         | Cycle stations sort: name → bitrate → ping → name |
+| `q` / `Esc` | Quit                                              |
 
 ## Configuration
 

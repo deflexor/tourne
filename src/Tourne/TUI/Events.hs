@@ -325,6 +325,30 @@ handleNormalKey key = case key of
     sendCmd (CmdVolume vol)
     schedulePersist
 
+  -- Cycle station sort mode: Name -> Bitrate -> Ping -> Name.
+  -- After changing the mode, try to keep the cursor on the same
+  -- station id (so the user's selection doesn't jump away), and
+  -- fall back to cursor 0 if the station is no longer present.
+  Vty.KChar 'o' -> do
+    st <- get
+    let prevSelected = appSelectedStation st
+        newMode      = nextSortMode (appStationSort st)
+        sorted       = sortStations newMode (appStations st)
+        -- Find the new index of the previously selected station, if any.
+        newIdx = case prevSelected of
+          Nothing -> 0
+          Just sid -> case List.findIndex (\s -> stationId s == sid) sorted of
+            Just i  -> i
+            Nothing -> 0
+    modifySt $ \s -> s
+      { appStationSort       = newMode
+      , appStationsListState = (appStationsListState s)
+          { listSelected = newIdx
+          , listOffset   = min (listOffset (appStationsListState s)) newIdx
+          }
+      }
+    schedulePersist
+
   -- Refresh
   Vty.KChar 'r' -> pure ()
 
@@ -372,9 +396,10 @@ handleSelect = do
 
     FocusStations -> do
       stations <- gets appStations
+      sortMode <- gets appStationSort
       idx      <- gets (listSelected . appStationsListState)
       -- Order must match the display (see Draw.hs renderStationsList)
-      let sorted = sortStationsByPing stations
+      let sorted = sortStations sortMode stations
       if idx >= 0 && idx < length sorted
         then do
           let station = List.genericIndex sorted idx

@@ -53,19 +53,21 @@ drawUI st =
 
   in [fullLayout]
   where
-    -- Suffix for the Stations pane title: includes the current tag and
-    -- (if set) the active filter. Examples:
-    --   ""                          — no tag, no filter
-    --   "[jazz]"                    — tag only
-    --   "(filter: 'foo')"           — filter only
-    --   "[jazz] (filter: 'foo')"    — both
-    stationsHeaderSuffix s = tagSuffix s <> filterSuffix s
+    -- Suffix for the Stations pane title: includes the current tag,
+    -- (if set) the active filter, and the active sort mode. Examples:
+    --   ""                                  — no tag, no filter, no sort
+    --   "[jazz]"                            — tag only
+    --   "(filter: 'foo')"                   — filter only
+    --   "[jazz] (sort: name)"               — tag + sort
+    --   "[jazz] (filter: 'foo') (sort: bitrate)"
+    stationsHeaderSuffix s = tagSuffix s <> filterSuffix s <> sortSuffix s
     tagSuffix s = case appCurrentTag s of
       Nothing  -> ""
       Just tag -> "[" <> tag <> "]"
     filterSuffix s = case appActiveFilter s of
       Nothing -> ""
       Just f  -> " (filter: '" <> f <> "')"
+    sortSuffix s = " (sort: " <> sortModeLabel (appStationSort s) <> ")"
 
 --------------------------------------------------------------------------------
 -- Tags list
@@ -106,8 +108,12 @@ renderStationsList st =
     off  = listOffset (appStationsListState st)
     stns = viewStations st
     focused = appFocus st == FocusStations
-    -- Order: stations with known ping first (ascending), then unknown ping by name
-    sorted  = sortStationsByPing stns
+    -- Order: determined by the user-selected sort mode (Name /
+    -- Bitrate / Ping). The list is no longer re-sorted implicitly
+    -- on every ping update; pings stream in as data and are
+    -- reflected in the per-row ping column, but row order is
+    -- stable until the user toggles it with the 'o' key.
+    sorted  = sortStations (appStationSort st) stns
     visible = drop off sorted
 
     -- Column widths (characters)
@@ -212,7 +218,7 @@ progressBar cur total
 renderHelp :: AppState -> Widget AppName
 renderHelp st =
   let
-    base = " \8593/\8595 Nav  |  Enter Select  |  / Search  |  p Play  |  s Stop  |  q Quit"
+    base = " \8593/\8595 Nav  |  Enter Select  |  / Search  |  p Play  |  s Stop  |  o Sort  |  q Quit"
     focusHint = case appFocus st of
       FocusTags     -> "  [Tags]"
       FocusStations -> "  [Stations]"
