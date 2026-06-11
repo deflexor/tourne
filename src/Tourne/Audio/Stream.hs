@@ -17,6 +17,7 @@ import Data.IORef qualified as IORef
 import System.IO (hFlush, hPutStrLn)
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Data.CaseInsensitive qualified as CI
+import Tourne.Error (AppError (..))
 import Tourne.Http (getSharedManager)
 import Tourne.Types (debugEnabled)
 
@@ -35,7 +36,7 @@ data StreamHandle = StreamHandle
 -- Open a radio stream
 --------------------------------------------------------------------------------
 
-openStream :: Text -> IO (Either Text StreamHandle)
+openStream :: Text -> IO (Either AppError StreamHandle)
 openStream urlText = do
   result <- try $ do
     chan     <- STM.newTChanIO
@@ -99,7 +100,7 @@ openStream urlText = do
 
   case result of
     Right handle -> pure (Right handle)
-    Left (e :: SomeException) -> pure (Left $ show e)
+    Left (e :: SomeException) -> pure (Left (StreamError (show e)))
 
 -- | Strip ICY metadata blocks from a byte stream chunk.
 -- Takes the metadata interval, remaining bytes before next metadata boundary,

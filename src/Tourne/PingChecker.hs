@@ -13,6 +13,7 @@ import Network.HTTP.Client qualified as HC
 import Network.HTTP.Simple (parseRequest, setRequestHeader, httpNoBody)
 import Network.HTTP.Types.Header (hUserAgent)
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
+import Tourne.Error (AppError (..), renderError)
 import Tourne.Types
 import Tourne.Config
 
@@ -72,8 +73,12 @@ runPingChecker cancelVar cursorVar cfg stationVar onResult = do
           forM_ toPing $ \station -> do
             cancelled' <- STM.atomically $ STM.readTVar cancelVar
             unless cancelled' $ do
-              pingStation (toString (stationUrl station)) responseMicros
-                >>= onResult (stationId station)
+              result <- pingStation (toString (stationUrl station)) responseMicros
+              -- The onResult callback carries an Either Text Double
+              -- result type (not a recoverable error). Convert the
+              -- structured AppError to its rendered form here.
+              let cbResult = either (Left . renderError) Right result
+              onResult (stationId station) cbResult
           -- Sleep in 250ms slices so shutdown is responsive.
           sleepResponsively cancelVar intervalMicros
           loop
@@ -119,9 +124,14 @@ sleepResponsively cancelVar totalMicros = go totalMicros
               go (remaining - slice)
 
 -- | Ping a single station URL. Returns the round-trip time in seconds, or
--- a textual error on failure. The response timeout (in microseconds)
+-- a structured error on failure. The response timeout (in microseconds)
 -- bounds the per-request wait.
-pingStation :: String -> Int -> IO (Either Text Double)
+--
+-- Internally returns 'AppError' for the HTTP-failure case; the caller
+-- ('runPingChecker') converts to the 'Either Text Double' result
+-- expected by the consumer callback (the LHS is a *result* type, not
+-- a recoverable error).
+pingStation :: String -> Int -> IO (Either AppError Double)
 pingStation url responseMicros = do
   result <- try $ do
     start <- getCurrentTime
@@ -136,4 +146,4 @@ pingStation url responseMicros = do
     pure diff
   case result of
     Right ping -> pure (Right ping)
-    Left (e :: SomeException) -> pure (Left $ show e)
+    Left (e :: SomeException) -> pure (Left (HttpError (show e)))

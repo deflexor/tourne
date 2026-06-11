@@ -264,8 +264,8 @@ startPlayback url = do
   streamResult <- liftIO $ Stream.openStream url
   case streamResult of
     Left err -> liftIO $ do
-      STM.atomically $ STM.writeTVar stateVar (ErrorOccurred $ toText err)
-      STM.atomically $ STM.writeTVar healthVar (StreamLost $ toText err)
+      STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
+      STM.atomically $ STM.writeTVar healthVar (StreamLost (renderError err))
 
     Right streamHandle -> do
       decoderResult <- liftIO Decoder.mpg123Open
