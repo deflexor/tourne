@@ -135,17 +135,22 @@ collectFrames h acc = do
         pcmBytes <- BS.packCStringLen (castPtr buf, nBytes)
 
         -- Re-read format on every call to handle MPG123_NEW_FORMAT (-11)
-        (rate, channels, _encoding) <- alloca $ \pRate -> alloca $ \pChan -> alloca $ \pEnc -> do
+        (rate, channels, encCInt) <- alloca $ \pRate -> alloca $ \pChan -> alloca $ \pEnc -> do
           _ <- c_mpg123_getformat h pRate pChan pEnc
           (,,) <$> fmap fromIntegral (peek pRate)
                <*> fmap fromIntegral (peek pChan)
                <*> peek pEnc
 
-        let frame = AudioFrame
+        -- Default to 16-bit signed if the decoder reports an unknown
+        -- encoding; this is the format the SDL2 device is opened in
+        -- (see Audio/Player.hs initAudio). A wrong-bytes-per-frame
+        -- assumption is loud (no audio) rather than silent.
+        let encoding = fromMaybe Mpg123EncSigned16 (cIntToMpg123Enc encCInt)
+            frame = AudioFrame
               { afPcmData  = pcmBytes
               , afRate     = rate
               , afChannels = channels
-              , afEncoding = Mpg123EncSigned16
+              , afEncoding = encoding
               }
         collectFrames h (frame : acc)
 

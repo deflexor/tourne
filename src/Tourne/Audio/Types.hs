@@ -28,13 +28,32 @@ data Mpg123Encoding
   | Mpg123EncUnsigned8   -- ^ 8-bit unsigned PCM
   | Mpg123EncSigned8     -- ^ 8-bit signed PCM
   | Mpg123EncFloat32     -- ^ 32-bit float PCM
-  deriving (Eq, Show)
+  deriving (Eq, Show, Enum, Bounded)
 
+-- | Mapping from 'Mpg123Encoding' to the libmpg123 C constants.
+-- Values are from <https://www.mpg123.de/api/mpg123_8h_source.html>.
+mpg123EncToCInt :: Mpg123Encoding -> CInt
+mpg123EncToCInt Mpg123EncSigned16  = 0x8000
+mpg123EncToCInt Mpg123EncUnsigned8 = 0x0400
+mpg123EncToCInt Mpg123EncSigned8   = 0x0080
+mpg123EncToCInt Mpg123EncFloat32   = 0xe000
+
+-- | Inverse mapping. 'Nothing' for values not in the known set;
+-- callers should treat unknown encodings as a hard decoder error.
+cIntToMpg123Enc :: CInt -> Maybe Mpg123Encoding
+cIntToMpg123Enc 0x8000 = Just Mpg123EncSigned16
+cIntToMpg123Enc 0x0400 = Just Mpg123EncUnsigned8
+cIntToMpg123Enc 0x0080 = Just Mpg123EncSigned8
+cIntToMpg123Enc 0xe000 = Just Mpg123EncFloat32
+cIntToMpg123Enc _      = Nothing
+
+-- Backwards-compat aliases for the constants that were already used
+-- elsewhere; new code should prefer 'mpg123EncToCInt' / 'cIntToMpg123Enc'.
 mpg123EncSigned16 :: CInt
-mpg123EncSigned16 = 0x8000
+mpg123EncSigned16 = mpg123EncToCInt Mpg123EncSigned16
 
 mpg123EncFloat32 :: CInt
-mpg123EncFloat32 = 0xe000
+mpg123EncFloat32 = mpg123EncToCInt Mpg123EncFloat32
 
 --------------------------------------------------------------------------------
 -- Decoded audio frame
