@@ -94,9 +94,28 @@ mpg123Open = do
     if h /= nullPtr
       then do
         rc <- c_mpg123_open_feed h
-        if rc == 0
-          then pure $ Right h
-          else c_mpg123_delete h >> pure (Left (DecoderError "Failed to open feed"))
+        if rc /= 0
+          then c_mpg123_delete h >> pure (Left (DecoderError "Failed to open feed"))
+          else do
+            -- Force the output format to match the SDL2 device we open
+            -- in Tourne.Audio.Player (44100 Hz, 2 channels, signed 16-bit).
+            -- Without this, mpg123 may keep buffering bytes forever
+            -- waiting for the input to match its default format, or
+            -- happily hand us a different rate/channels/encoding that
+            -- the SDL2 queue misinterprets. mpg123_format returns
+            -- MPG123_OK on success and -10/-11 if the format is
+            -- rejected; we treat any non-zero as a hard error so the
+            -- failure mode is loud rather than silent no-audio.
+            let rate     = 44100 :: CLong
+                channels = 2 :: CInt
+                encoding = mpg123EncSigned16 :: CInt
+            fmtRc <- c_mpg123_format h rate channels encoding
+            if fmtRc == 0
+              then pure $ Right h
+              else do
+                c_mpg123_delete h
+                pure $ Left $ DecoderError $
+                  "mpg123_format rejected 44100/2/S16 (rc=" <> show fmtRc <> ")"
       else do
         errCode <- peek perr
         pure $ Left $ DecoderError $ "Failed to create handle: " <> show errCode
@@ -120,9 +139,17 @@ mpg123Feed h input = do
       pure $ Right frames
 
 collectFrames :: Ptr Mpg123Handle -> [AudioFrame] -> IO [AudioFrame]
-collectFrames h acc = do
+collectFrames h acc = readOnce h acc
+
+-- | Inner loop: one call to 'mpg123_read', dispatch on its return code.
+-- Loop on MPG123_NEW_FORMAT (-11) and stop on MPG123_NEED_MORE (-10)
+-- or MPG123_DONE (-1). 'mpg123_read' may return nBytes > 0 alongside
+-- a NEW_FORMAT code (the frame was decoded at the previous format
+-- and the new one starts after it); we keep the frame and continue.
+readOnce :: Ptr Mpg123Handle -> [AudioFrame] -> IO [AudioFrame]
+readOnce h acc = do
   let bufSize = 16384 :: CSize
-  allocaBytes (fromIntegral bufSize) $ \buf -> do
+  allocaBytes (fromIntegral bufSize) $ \(buf :: Ptr CUChar) -> do
     (rc, bytesRead) <- alloca $ \pBytes -> do
       poke pBytes 0
       rc <- c_mpg123_read h buf bufSize pBytes
@@ -130,30 +157,44 @@ collectFrames h acc = do
       pure (rc, n)
 
     let nBytes = fromIntegral bytesRead :: Int
-    if nBytes <= 0 || rc == (-1)
-      then pure (reverse acc)
-      else do
-        pcmBytes <- BS.packCStringLen (castPtr buf, nBytes)
+    case (rc :: CInt, nBytes) of
+      -- No more decoded frames available in the current input;
+      -- the caller (or the next feed) will produce more.
+      (-1, _)        -> pure (reverse acc)
+      (-10, _)       -> pure (reverse acc)
+      (-11, 0)       -> readOnce h acc  -- format changed but no data this call
+      (-11, _)       -> commitFrame h buf bytesRead acc >>= readOnce h
+      (0, n) | n > 0 -> commitFrame h buf bytesRead acc >>= readOnce h
+      _              -> pure (reverse acc)
 
-        -- Re-read format on every call to handle MPG123_NEW_FORMAT (-11)
-        (rate, channels, encCInt) <- alloca $ \pRate -> alloca $ \pChan -> alloca $ \pEnc -> do
-          _ <- c_mpg123_getformat h pRate pChan pEnc
-          (,,) <$> fmap fromIntegral (peek pRate)
-               <*> fmap fromIntegral (peek pChan)
-               <*> peek pEnc
-
-        -- Default to 16-bit signed if the decoder reports an unknown
-        -- encoding; this is the format the SDL2 device is opened in
-        -- (see Audio/Player.hs initAudio). A wrong-bytes-per-frame
-        -- assumption is loud (no audio) rather than silent.
-        let encoding = fromMaybe Mpg123EncSigned16 (cIntToMpg123Enc encCInt)
-            frame = AudioFrame
-              { afPcmData  = pcmBytes
-              , afRate     = rate
-              , afChannels = channels
-              , afEncoding = encoding
-              }
-        collectFrames h (frame : acc)
+-- | Materialise the bytes 'mpg123_read' just wrote into 'buf' into
+-- an 'AudioFrame' after consulting 'mpg123_getformat'. Prepends to 'acc'.
+commitFrame
+  :: Ptr Mpg123Handle
+  -> Ptr CUChar
+  -> CSize
+  -> [AudioFrame]
+  -> IO [AudioFrame]
+commitFrame h buf bytesRead acc = do
+  let nBytes = fromIntegral bytesRead :: Int
+  pcmBytes <- BS.packCStringLen (castPtr buf, nBytes)
+  (rate, channels, encCInt) <- alloca $ \pRate -> alloca $ \pChan -> alloca $ \pEnc -> do
+    _ <- c_mpg123_getformat h pRate pChan pEnc
+    (,,) <$> fmap fromIntegral (peek pRate)
+         <*> fmap fromIntegral (peek pChan)
+         <*> peek pEnc
+  -- Default to 16-bit signed if the decoder reports an unknown
+  -- encoding; this is the format the SDL2 device is opened in
+  -- (see Audio/Player.hs initAudio). A wrong-bytes-per-frame
+  -- assumption is loud (no audio) rather than silent.
+  let encoding = fromMaybe Mpg123EncSigned16 (cIntToMpg123Enc encCInt)
+      frame = AudioFrame
+        { afPcmData  = pcmBytes
+        , afRate     = rate
+        , afChannels = channels
+        , afEncoding = encoding
+        }
+  pure (frame : acc)
 
 mpg123GetFormat :: Ptr Mpg123Handle -> IO (Int, Int, CInt)
 mpg123GetFormat h =

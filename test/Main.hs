@@ -10,12 +10,14 @@ import qualified Tourne.Test.SafeExceptions as SafeExceptions
 import qualified Tourne.Test.HttpClient as HttpClient
 import qualified Tourne.Test.Tracer as Tracer
 import qualified Tourne.Test.Util as Util
+import qualified Tourne.Test.Decoder as Decoder
 
 main :: IO ()
 main = defaultMain $ testGroup "Tourne"
   [ testGroup "Tourne.Types.sortStations" Sorting.tests
   , testGroup "Tourne.Persistence" Persistence.tests
   , testGroup "Tourne.Audio.Types.Mpg123" Mpg123.tests
+  , testGroup "Tourne.Audio.Decoder" Decoder.tests
   , testGroup "Tourne.Error" Error.tests
   , testGroup "Tourne.SafeExceptions" SafeExceptions.tests
   , testGroup "Tourne.Effect.HttpClient" HttpClient.tests

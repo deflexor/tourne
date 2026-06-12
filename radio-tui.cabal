@@ -131,6 +131,7 @@ test-suite tourne-test
     Tourne.Test.HttpClient
     Tourne.Test.Tracer
     Tourne.Test.Util
+    Tourne.Test.Decoder
   build-depends:
     , base
     , tourne
