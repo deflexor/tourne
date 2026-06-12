@@ -14,12 +14,15 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
 import Control.Concurrent.STM qualified as STM
 import Data.IORef qualified as IORef
-import System.IO (hFlush, hPutStrLn)
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Data.CaseInsensitive qualified as CI
 import Tourne.Error (AppError (..))
 import Tourne.Http (getSharedManager)
-import Tourne.Types (debugEnabled)
+
+-- | Debug-trace callback. The Player call site passes a callback
+-- derived from the 'Tracer' effect via 'withRunInIO'; tests can
+-- pass @\\_ _ -> pure ()@.
+type Trace = Text -> [Text] -> IO ()
 
 --------------------------------------------------------------------------------
 -- Stream handle
@@ -36,8 +39,8 @@ data StreamHandle = StreamHandle
 -- Open a radio stream
 --------------------------------------------------------------------------------
 
-openStream :: Text -> IO (Either AppError StreamHandle)
-openStream urlText = do
+openStream :: Text -> Trace -> IO (Either AppError StreamHandle)
+openStream urlText trace = do
   result <- tryAny $ do
     chan     <- STM.newTChanIO
     errRef   <- IORef.newIORef Nothing
@@ -76,9 +79,8 @@ openStream urlText = do
                     | CI.foldCase k == "icy-metaint" = Just v
                     | otherwise = acc
           when (icyMetaint > 0) $
-            when debugEnabled $
-              hPutStrLn stderr ("[feed] icy-metaint=" <> show icyMetaint)
-          feedStream bodyReader chan cancelRef icyMetaint
+            trace "[feed] icy-metaint" [show icyMetaint]
+          feedStream trace bodyReader chan cancelRef icyMetaint
       case streamResult of
         Left e -> do
           IORef.writeIORef errRef (Just $ show e)
@@ -158,8 +160,8 @@ stripIcyMeta interval remaining bs
 
 -- | Feed stream data from body reader to channel.
 -- Strips ICY metadata if metaInterval > 0.
-feedStream :: HC.BodyReader -> STM.TChan ByteString -> IORef.IORef Bool -> Int -> IO ()
-feedStream bodyReader chan cancelRef metaInterval = do
+feedStream :: Trace -> HC.BodyReader -> STM.TChan ByteString -> IORef.IORef Bool -> Int -> IO ()
+feedStream trace bodyReader chan cancelRef metaInterval = do
   startTime <- getCurrentTime
   go BS.empty metaInterval startTime  -- start with full interval before first meta boundary
   where
@@ -175,9 +177,7 @@ feedStream bodyReader chan cancelRef metaInterval = do
               unless (BS.null acc) $ do
                 STM.atomically $ STM.writeTChan chan acc
                 let accKb = BS.length acc `div` 1024
-                when debugEnabled $ do
-                  hPutStrLn stderr ("feed send final chunk=" <> show accKb <> "KB")
-                  hFlush stderr
+                trace "feed send final chunk" [show accKb <> "KB"]
               STM.atomically $ STM.writeTChan chan BS.empty  -- Signal end
             else do
               let rawSize = BS.length chunk
@@ -185,17 +185,22 @@ feedStream bodyReader chan cancelRef metaInterval = do
                   strippedSize = BS.length cleanChunk
                   newAcc = acc <> cleanChunk
               when (metaInterval > 0 && rawSize /= strippedSize) $
-                when debugEnabled $
-                  hPutStrLn stderr ("[strip] raw=" <> show rawSize <> " stripped=" <> show strippedSize <> " diff=" <> show (rawSize - strippedSize) <> " rem=" <> show remaining')
+                trace "[strip] raw"
+                  [ "raw=" <> show rawSize
+                  , "stripped=" <> show strippedSize
+                  , "diff=" <> show (rawSize - strippedSize)
+                  , "rem=" <> show remaining'
+                  ]
               if BS.length newAcc >= minBatchSize
                 then do
                   STM.atomically $ STM.writeTChan chan newAcc
                   let accKb = BS.length newAcc `div` 1024
                   now <- getCurrentTime
                   let elapsedMs = round (realToFrac (diffUTCTime now t0) * 1000 :: Double) :: Int
-                  when debugEnabled $ do
-                    hPutStrLn stderr ("feed send chunk=" <> show accKb <> "KB elapsed_ms=" <> show elapsedMs)
-                    hFlush stderr
+                  trace "feed send chunk"
+                    [ show accKb <> "KB"
+                    , "elapsed_ms=" <> show elapsedMs
+                    ]
                   go BS.empty remaining' now
                 else go newAcc remaining' t0
 

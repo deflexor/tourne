@@ -24,7 +24,7 @@ import Foreign.C.Types (CDouble(..), CInt(..))
 import Foreign.C.String (CString, peekCString)
 import System.Directory (doesPathExist)
 import System.Environment qualified as Env
-import System.IO (hFlush, hPutStrLn)
+import System.IO (hFlush)
 import Data.Time.Clock (getCurrentTime, diffUTCTime, UTCTime)
 import Data.Text qualified as Text
 import Data.Char (toLower)
@@ -253,7 +253,12 @@ startPlayback url = do
     , aeStreamHealth = healthVar
     , aeDeviceId     = devId
     } <- ask
-  streamResult <- liftIO $ Stream.openStream url
+  -- Extract a Tracer -> IO callback so Stream.openStream (a pure
+  -- IO function called from inside an Eff context) can route its
+  -- debug events through the same Tracer interpreter as the decode
+  -- loop. The withRunInIO unlift captures the Eff's environment.
+  streamTrace <- withRunInIO $ \runInIO -> pure (\l fs -> runInIO (traceEvent l fs))
+  streamResult <- liftIO $ Stream.openStream url streamTrace
   case streamResult of
     Left err -> liftIO $ do
       STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
