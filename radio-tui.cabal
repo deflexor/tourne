@@ -57,6 +57,11 @@ library
     Tourne.TUI.App
     Tourne.TUI.Draw
     Tourne.TUI.Events
+    Tourne.TUI.Events.Normal
+    Tourne.TUI.Events.Navigate
+    Tourne.TUI.Events.Persist
+    Tourne.TUI.Events.Search
+    Tourne.TUI.Events.Util
 
   build-depends:
     , base                 >= 4.18    && < 5
