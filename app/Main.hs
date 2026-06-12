@@ -8,6 +8,8 @@ import Brick.BChan (BChan, newBChan, writeBChan)
 import Brick.Main (customMain)
 import Graphics.Vty.CrossPlatform (mkVty)
 import Graphics.Vty qualified as Vty
+import Network.HTTP.Client (newManager)
+import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.Posix.Signals (sigINT, sigTERM, installHandler, Handler(Catch))
 
 import Tourne.Types
@@ -32,8 +34,14 @@ main = do
   let cfg = defaultConfig
   chan <- newBChan 100
 
+  -- Build the shared HTTP Manager once for the whole program.
+  -- Used by the radio-browser API client, the audio stream
+  -- fetcher, and the ping checker; sharing it keeps the
+  -- connection pool warm.
+  httpMgr <- newManager tlsManagerSettings
+
   -- Initialize audio engine
-  audioEngine <- Audio.initAudio >>= \case
+  audioEngine <- Audio.initAudio httpMgr >>= \case
     Right e  -> pure e
     Left err -> do
       hPutStrLn stderr ("Audio init failed: " <> toString (renderError err))
@@ -50,7 +58,7 @@ main = do
   -- Always kick a background tag refresh so the list stays current,
   -- but the UI shows the cached tags immediately on the first frame.
   _ <- forkIO $ do
-    result <- RB.fetchTags cfg
+    result <- RB.fetchTags httpMgr cfg
     case result of
       Right tags -> writeBChan chan (EvTagsLoaded tags)
       Left err   -> writeBChan chan (EvError err)
@@ -60,7 +68,7 @@ main = do
   -- trigger the auto-resume if appropriate.
   case psCurrentTag persisted of
     Just tag -> void $ forkIO $ do
-      result <- RB.fetchStationsByTag cfg tag (configMaxStations cfg)
+      result <- RB.fetchStationsByTag httpMgr cfg tag (configMaxStations cfg)
       case result of
         Right stations -> writeBChan chan (EvStationsLoaded stations)
         Left _         -> pure ()  -- keep cached list on failure
@@ -84,7 +92,7 @@ main = do
 
   -- Create initial app state (with reference to event channel), seeded
   -- from the persisted snapshot.
-  initialState <- TUI.initialAppState (Just chan) cfg persisted
+  initialState <- TUI.initialAppState (Just chan) httpMgr cfg persisted
   let initialState' = initialState
         { appAudioCommand = Just (Audio.audioCommand audioEngine)
         , appStationsVar  = Just stationsVar

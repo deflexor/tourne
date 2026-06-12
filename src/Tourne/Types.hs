@@ -11,6 +11,7 @@ import Brick.BChan (BChan)
 import Tourne.Audio.Types (AudioCommand)
 import Tourne.Config (Config)
 import Tourne.Error (AppError)
+import Network.HTTP.Client qualified as HC
 
 --------------------------------------------------------------------------------
 -- Configuration
@@ -267,6 +268,7 @@ data AppState = AppState
   , appLoadingStations   :: !Bool
   , appAudioCommand      :: !(Maybe (AudioCommand -> IO ()))
   , appStationsVar       :: !(Maybe (TVar [Station]))
+  , appHttpManager       :: !(Maybe HC.Manager)
   , appWasPlaying        :: !Bool
   -- ^ True iff the user exited while a station was selected for playback.
   --   Used to decide whether to auto-resume on next launch. Independent of

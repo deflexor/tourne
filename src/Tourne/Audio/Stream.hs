@@ -9,6 +9,7 @@ module Tourne.Audio.Stream
 import Relude hiding (hFlush)
 import Control.Concurrent (forkIO)
 import Control.Exception.Safe (tryAny)
+import Network.HTTP.Client (Manager)
 import Network.HTTP.Client qualified as HC
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
@@ -17,7 +18,6 @@ import Data.IORef qualified as IORef
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Data.CaseInsensitive qualified as CI
 import Tourne.Error (AppError (..))
-import Tourne.Http (getSharedManager)
 
 -- | Debug-trace callback. The Player call site passes a callback
 -- derived from the 'Tracer' effect via 'withRunInIO'; tests can
@@ -39,15 +39,12 @@ data StreamHandle = StreamHandle
 -- Open a radio stream
 --------------------------------------------------------------------------------
 
-openStream :: Text -> Trace -> IO (Either AppError StreamHandle)
-openStream urlText trace = do
+openStream :: Manager -> Text -> Trace -> IO (Either AppError StreamHandle)
+openStream mgr urlText trace = do
   result <- tryAny $ do
     chan     <- STM.newTChanIO
     errRef   <- IORef.newIORef Nothing
     cancelRef <- IORef.newIORef False
-
-    -- Create manager
-    mgr <- getSharedManager
 
     -- Parse and configure request
     initReq <- HC.parseRequest (toString urlText)
@@ -91,9 +88,8 @@ openStream urlText trace = do
       { shCancel = do
           -- Only signal cancellation. The streaming thread checks
           -- this flag on each read; closing the shared HTTP manager
-          -- (which it would also affect, since the manager is a
-          -- process-wide singleton from Tourne.Http) would break any
-          -- concurrent stream.
+          -- (which is process-wide) would break any concurrent
+          -- stream.
           IORef.writeIORef cancelRef True
       , shChunks = chan
       , shError  = errRef

@@ -37,10 +37,10 @@ library
   exposed-modules:
     Tourne
     Tourne.Error
+    Tourne.Effect.HttpClient
     Tourne.Effect.Tracer
     Tourne.Types
     Tourne.Config
-    Tourne.Http
     Tourne.RadioBrowser
     Tourne.PingChecker
     Tourne.Persistence
@@ -114,6 +114,8 @@ executable tourne
     , aeson
     , bytestring
     , directory
+    , http-client
+    , http-client-tls
 
 test-suite tourne-test
   import:         defaults
@@ -126,6 +128,7 @@ test-suite tourne-test
     Tourne.Test.Mpg123
     Tourne.Test.Error
     Tourne.Test.SafeExceptions
+    Tourne.Test.HttpClient
     Tourne.Test.Tracer
     Tourne.Test.Util
   build-depends:
@@ -139,6 +142,8 @@ test-suite tourne-test
     , async          >= 2.2    && < 2.3
     , effectful      >= 2.6    && < 2.7
     , effectful-core >= 2.6    && < 2.7
+    , http-client
+    , http-client-tls
     , tasty          >= 1.4    && < 1.6
     , tasty-hunit    >= 0.10   && < 0.11
     , HUnit          >= 1.6    && < 1.7

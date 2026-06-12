@@ -7,6 +7,7 @@ module Tourne.RadioBrowser
 
 import Relude
 import Control.Exception.Safe (tryAny)
+import Network.HTTP.Client (Manager)
 import Network.HTTP.Conduit qualified as HTTP
 import Network.HTTP.Simple
   ( httpJSON, parseRequest, setRequestQueryString
@@ -22,7 +23,6 @@ import Network.HTTP.Types.URI (QueryItem)
 import Tourne.Config (Config, configApiBaseUrl)
 import Tourne.Error (AppError (..))
 import Tourne.Types
-import Tourne.Http (getSharedManager)
 
 --------------------------------------------------------------------------------
 -- Query parameters
@@ -57,14 +57,14 @@ jsonHeader :: [(HeaderName, BS.ByteString)]
 jsonHeader = [(hUserAgent, "TourneRadio/0.1.0")]
 
 -- | Make a GET request and parse JSON response. Distinguishes HTTP
--- failures (network/TLS) from JSON parse failures.
-apiGet :: FromJSON a => Text -> Text -> IO (Either AppError a)
-apiGet base path = do
+-- failures (network/TLS) from JSON parse failures. Takes a
+-- pre-built 'Manager' so the call site owns its lifecycle.
+apiGet :: FromJSON a => Manager -> Text -> Text -> IO (Either AppError a)
+apiGet mgr base path = do
   let url = base <> path
   result <- tryAny $ do
     initReq <- parseRequest (toString url)
     let req = initReq { HTTP.requestHeaders = jsonHeader }
-    mgr <- getSharedManager
     response <- HTTP.httpLbs req mgr
     pure (Aeson.eitherDecode (HTTP.responseBody response))
   case result of
@@ -77,9 +77,9 @@ apiGet base path = do
 --------------------------------------------------------------------------------
 
 -- | Fetch all tags from the API
-fetchTags :: Config -> IO (Either AppError [Tag])
-fetchTags cfg = do
-  result <- apiGet (configApiBaseUrl cfg) "/json/tags" :: IO (Either AppError [Tag])
+fetchTags :: Manager -> Config -> IO (Either AppError [Tag])
+fetchTags mgr cfg = do
+  result <- apiGet mgr (configApiBaseUrl cfg) "/json/tags" :: IO (Either AppError [Tag])
   case result of
     Right tags -> pure $ Right $ take 200 $ sortTags tags
     Left e     -> pure $ Left e
@@ -93,10 +93,10 @@ sortTags = sortOn (Down . tagStationCount)
 --------------------------------------------------------------------------------
 
 -- | Fetch stations by tag
-fetchStationsByTag :: Config -> Text -> Int -> IO (Either AppError [Station])
-fetchStationsByTag cfg tag limit = do
+fetchStationsByTag :: Manager -> Config -> Text -> Int -> IO (Either AppError [Station])
+fetchStationsByTag mgr cfg tag limit = do
   let path = "/json/stations/bytag/" <> tag
-  result <- apiGet (configApiBaseUrl cfg) path :: IO (Either AppError [Station])
+  result <- apiGet mgr (configApiBaseUrl cfg) path :: IO (Either AppError [Station])
   case result of
     Right stations -> do
       let sortedStations = sortByClickCount stations
@@ -104,10 +104,10 @@ fetchStationsByTag cfg tag limit = do
     Left e -> pure $ Left e
 
 -- | Search stations by name
-searchStations :: Config -> Text -> IO (Either AppError [Station])
-searchStations cfg query = do
+searchStations :: Manager -> Config -> Text -> IO (Either AppError [Station])
+searchStations mgr cfg query = do
   let path = "/json/stations/byname/" <> query
-  result <- apiGet (configApiBaseUrl cfg) path :: IO (Either AppError [Station])
+  result <- apiGet mgr (configApiBaseUrl cfg) path :: IO (Either AppError [Station])
   case result of
     Right stations -> pure $ Right $ sortByClickCount stations
     Left e         -> pure $ Left e

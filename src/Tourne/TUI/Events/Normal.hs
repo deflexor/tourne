@@ -152,13 +152,15 @@ handleSelect = do
           -- Fetch stations for the selected tag in background
           mChan <- gets appEventChan
           cfg   <- gets appConfig
-          case mChan of
-            Just chan -> liftIO $ void $ forkIO $ do
-              result <- RB.fetchStationsByTag cfg selectedTagName 100
-              case result of
-                Right stations -> writeBChan chan (EvStationsLoaded stations)
-                Left err       -> writeBChan chan (EvError err)
-            Nothing -> pure ()
+          mmgr  <- gets appHttpManager
+          case (mChan, mmgr) of
+            (Just chan, Just mgr) ->
+              liftIO $ void $ forkIO $ do
+                result <- RB.fetchStationsByTag mgr cfg selectedTagName 100
+                case result of
+                  Right stations -> writeBChan chan (EvStationsLoaded stations)
+                  Left err       -> writeBChan chan (EvError err)
+            _ -> pure ()
           schedulePersist
         else pure ()
 

@@ -12,6 +12,7 @@ import Graphics.Vty qualified as Vty
 import Graphics.Vty.Attributes (defAttr, withForeColor, withBackColor)
 
 import Tourne.Config (Config)
+import Network.HTTP.Client qualified as HC
 import Tourne.Types
 import Tourne.Persistence (PersistedState (..))
 import Tourne.TUI.Core
@@ -28,8 +29,8 @@ import Brick.BChan (BChan)
 -- the same view they left on the previous run. Runtime-only fields
 -- (event channel, command sink, TVars) are left as their default
 -- 'Nothing' values and populated by 'Main' before the app launches.
-initialAppState :: Maybe (BChan AppEvent) -> Config -> PersistedState -> IO AppState
-initialAppState mChan cfg persisted = pure AppState
+initialAppState :: Maybe (BChan AppEvent) -> HC.Manager -> Config -> PersistedState -> IO AppState
+initialAppState mChan mgr cfg persisted = pure AppState
   { appTags              = psTags persisted
   , appStations          = initialStations persisted
   , appCurrentTag        = psCurrentTag persisted
@@ -51,6 +52,7 @@ initialAppState mChan cfg persisted = pure AppState
   , appLoadingStations   = False
   , appAudioCommand      = Nothing
   , appStationsVar       = Nothing
+  , appHttpManager       = Just mgr
   , appWasPlaying        = psWasPlaying persisted
   , appResumePending     = psWasPlaying persisted
   , appStationsByTag     = psStationsByTag persisted

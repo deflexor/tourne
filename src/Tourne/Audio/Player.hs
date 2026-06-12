@@ -20,6 +20,7 @@ import Foreign.Storable (poke, peek)
 import Foreign.Marshal.Alloc (alloca)
 import Foreign.C.Types (CInt)
 import Foreign.C.String (peekCString)
+import Network.HTTP.Client (Manager)
 import System.Directory (doesPathExist)
 import System.Environment qualified as Env
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
@@ -36,6 +37,7 @@ import Tourne.Audio.Types
 import Tourne.Audio.Decoder qualified as Decoder
 import Tourne.Audio.Stream qualified as Stream
 import Tourne.Effect.Tracer (Tracer, runTracer, traceEvent)
+import Tourne.Effect.HttpClient (HttpClient, runHttpClient, getManager)
 
 import Tourne.Audio.Player.State
   ( AudioEngine (..), PlaybackEnv (..), queueSafetyBytes )
@@ -51,10 +53,14 @@ import Tourne.Audio.Player.Helpers (adjustVolume, drainChan)
 -- | Initialize the audio system. On success, the returned
 -- 'AudioEngine' is wired into a background command-processing
 -- thread. The interpreter stack on that thread is
--- @runTracer \>\> runReader engine\>; both effects are in scope
--- for every spawned decode action.
-initAudio :: IO (Either AppError AudioEngine)
-initAudio = do
+-- @runHttpClient \>\> runTracer \>\> runReader engine\>; all three
+-- effects are in scope for every spawned decode action.
+--
+-- The HTTP 'Manager' is passed in (rather than built here) so the
+-- whole program shares one 'Manager' across the API client, the
+-- audio stream fetcher, and the ping checker.
+initAudio :: Manager -> IO (Either AppError AudioEngine)
+initAudio mgr = do
   -- Set SDL to use dummy video driver (we only need audio)
   Env.setEnv "SDL_VIDEODRIVER" "dummy"
 
@@ -134,7 +140,8 @@ initAudio = do
       tracerStart <- IORef.newIORef =<< getCurrentTime
       let tracerEnabled = debugEnabled
       _cmdThread <- async $
-        runEff $ runTracer tracerStart tracerEnabled $
+        runEff $ runHttpClient mgr $
+        runTracer tracerStart tracerEnabled $
         runReader engine commandProcessor
 
       pure (Right engine)
@@ -147,7 +154,7 @@ initAudio = do
 -- channel and dispatches them, running 'startPlayback' for 'CmdPlay'.
 -- All shared state lives in the 'AudioEngine' environment (no
 -- parameter threading).
-commandProcessor :: (Reader AudioEngine :> es, Tracer :> es, IOE :> es) => Eff es ()
+commandProcessor :: (Reader AudioEngine :> es, Tracer :> es, HttpClient :> es, IOE :> es) => Eff es ()
 commandProcessor = do
   AudioEngine
     { aeCancelToken = cancelVar
@@ -192,7 +199,7 @@ commandProcessor = do
 
 -- | Start actual playback of a stream URL using queued audio.
 startPlayback
-  :: (Reader AudioEngine :> es, Tracer :> es, IOE :> es)
+  :: (Reader AudioEngine :> es, Tracer :> es, HttpClient :> es, IOE :> es)
   => Text
   -> Eff es ()
 startPlayback url = do
@@ -206,7 +213,9 @@ startPlayback url = do
   -- debug events through the same Tracer interpreter as the decode
   -- loop. The withRunInIO unlift captures the Eff's environment.
   streamTrace <- withRunInIO $ \runInIO -> pure (\l fs -> runInIO (traceEvent l fs))
-  streamResult <- liftIO $ Stream.openStream url streamTrace
+  -- Likewise, extract the HTTP Manager from the HttpClient effect.
+  httpMgr    <- getManager
+  streamResult <- liftIO $ Stream.openStream httpMgr url streamTrace
   case streamResult of
     Left err -> liftIO $ do
       STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
