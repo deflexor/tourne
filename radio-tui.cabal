@@ -50,6 +50,9 @@ library
     Tourne.Audio.Stream
     Tourne.Audio.Decoder
     Tourne.Audio.Player
+    Tourne.Audio.Player.FFI
+    Tourne.Audio.Player.State
+    Tourne.Audio.Player.Helpers
     Tourne.TUI.Core
     Tourne.TUI.App
     Tourne.TUI.Draw

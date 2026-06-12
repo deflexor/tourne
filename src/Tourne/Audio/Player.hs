@@ -6,34 +6,29 @@ module Tourne.Audio.Player
   , readPlayerState
   , readVolume
   , readStreamHealth
-  , AudioCommand(..)
+  , AudioCommand (..)
   ) where
 
-import Relude hiding (hFlush, Reader, runReader, ask, asks, local)
+import Relude hiding (Reader, runReader, ask, asks, local, MonadReader)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async)
 import Control.Concurrent.STM qualified as STM
 import Data.ByteString qualified as BS
-import Data.ByteString.Unsafe (unsafeUseAsCString)
-import Data.ByteString.Internal (unsafeCreate)
 import Data.IORef qualified as IORef
-import Foreign.Ptr (Ptr, castPtr, nullFunPtr, nullPtr)
-import Foreign.Storable (poke, peek, peekByteOff, pokeByteOff)
+import Foreign.Ptr (nullFunPtr, nullPtr)
+import Foreign.Storable (poke, peek)
 import Foreign.Marshal.Alloc (alloca)
-import Foreign.C.Types (CDouble(..), CInt(..))
-import Foreign.C.String (CString, peekCString)
+import Foreign.C.Types (CInt)
+import Foreign.C.String (peekCString)
 import System.Directory (doesPathExist)
 import System.Environment qualified as Env
-import System.IO (hFlush)
-import Data.Time.Clock (getCurrentTime, diffUTCTime, UTCTime)
-import Data.Text qualified as Text
+import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Data.Char (toLower)
 import Effectful
-import Effectful.Reader.Static
+import Effectful.Reader.Static (Reader, runReader, ask)
 import SDL qualified
 import SDL.Raw.Audio qualified as SDLRaw
-import SDL.Raw.Types (AudioSpec(..))
-
+import SDL.Raw.Types (AudioSpec (..))
 
 import Tourne.Types
 import Tourne.Error (AppError (..), renderError)
@@ -42,70 +37,22 @@ import Tourne.Audio.Decoder qualified as Decoder
 import Tourne.Audio.Stream qualified as Stream
 import Tourne.Effect.Tracer (Tracer, runTracer, traceEvent)
 
---------------------------------------------------------------------------------
--- FFI imports
---------------------------------------------------------------------------------
-
--- | FFI import for SDL_GetQueuedAudioSize (not exposed by Haskell sdl2 bindings)
-foreign import ccall "SDL_GetQueuedAudioSize"
-  c_sdl_get_queued_audio_size :: Word32 -> IO Word32
-
--- | FFI import for SDL_GetAudioDeviceStatus
--- Returns: 0=STOPPED, 1=PLAYING, 2=PAUSED
-foreign import ccall "SDL_GetAudioDeviceStatus"
-  c_sdl_get_audio_device_status :: Word32 -> IO CInt
-
--- | FFI import for SDL_PauseAudioDevice (with return value)
--- Returns 0 on success, -1 on error
-foreign import ccall "SDL_PauseAudioDevice"
-  c_sdl_pause_audio_device :: Word32 -> CInt -> IO CInt
-
--- | FFI import for SDL_GetError
--- Returns a string describing the last SDL error
-foreign import ccall "SDL_GetError"
-  c_sdl_get_error :: IO CString
-
---------------------------------------------------------------------------------
--- Audio engine handle
---------------------------------------------------------------------------------
-
-data AudioEngine = AudioEngine
-  { aeDecodedChan   :: !(STM.TChan (Maybe ByteString))
-  , aeCmdChan       :: !(STM.TChan AudioCommand)
-  , aeStateVar      :: !(STM.TVar PlayerState)
-  , aeStreamHealth  :: !(STM.TVar StreamHealth)
-  , aeVolumeVar     :: !(STM.TVar Double)
-  , aeRateVar       :: !(STM.TVar Int)
-  , aeChannelsVar   :: !(STM.TVar Int)
-  , aeDeviceId      :: !Word32  -- SDL2 AudioDeviceID
-  , aeCancelToken   :: !(STM.TVar Bool)
-  , aeLeftoverVar   :: !(IORef.IORef ByteString)
-  } deriving (Generic)
-
---------------------------------------------------------------------------------
--- Per-playback environment (created fresh for each CmdPlay)
---------------------------------------------------------------------------------
-
--- | State local to a single playback run: the stream + decoder handles, the
--- debug timer, and the buffering target. Distinct from 'AudioEngine' (shared,
--- long-lived) because each 'CmdPlay' opens its own stream and decoder.
-data PlaybackEnv = PlaybackEnv
-  { peStreamHandle  :: !Stream.StreamHandle
-  , peDecoderHandle :: !(Ptr Decoder.Mpg123Handle)
-  , peBufferTarget  :: !Int
-  }
-
--- | Minimum SDL queue size before the decode loop falls back to a blocking
--- stream read. Below this, the loop blocks on the network to keep the device
--- fed; above it, it spins (non-blocking) to avoid freezing on stalls.
-queueSafetyBytes :: Word32
-queueSafetyBytes = 262144  -- 256KB
+import Tourne.Audio.Player.State
+  ( AudioEngine (..), PlaybackEnv (..), queueSafetyBytes )
+import Tourne.Audio.Player.FFI
+  ( c_sdl_get_queued_audio_size, c_sdl_get_audio_device_status
+  , c_sdl_pause_audio_device, c_sdl_get_error, queueToDevice )
+import Tourne.Audio.Player.Helpers (adjustVolume, drainChan)
 
 --------------------------------------------------------------------------------
 -- Initialization
 --------------------------------------------------------------------------------
 
--- | Initialize audio system
+-- | Initialize the audio system. On success, the returned
+-- 'AudioEngine' is wired into a background command-processing
+-- thread. The interpreter stack on that thread is
+-- @runTracer \>\> runReader engine\>; both effects are in scope
+-- for every spawned decode action.
 initAudio :: IO (Either AppError AudioEngine)
 initAudio = do
   -- Set SDL to use dummy video driver (we only need audio)
@@ -196,9 +143,10 @@ initAudio = do
 -- Command processing
 --------------------------------------------------------------------------------
 
--- | Background command loop. Reads 'AudioCommand's from the command channel
--- and dispatches them, running 'startPlayback' for 'CmdPlay'. All shared
--- state lives in the 'AudioEngine' environment (no parameter threading).
+-- | Background command loop. Reads 'AudioCommand's from the command
+-- channel and dispatches them, running 'startPlayback' for 'CmdPlay'.
+-- All shared state lives in the 'AudioEngine' environment (no
+-- parameter threading).
 commandProcessor :: (Reader AudioEngine :> es, Tracer :> es, IOE :> es) => Eff es ()
 commandProcessor = do
   AudioEngine
@@ -304,13 +252,13 @@ startPlayback url = do
           liftIO $ SDLRaw.pauseAudioDevice devId 1
 
 --------------------------------------------------------------------------------
--- Decode loop and chunk processing (extracted top-level, individually testable)
+-- Decode loop and chunk processing
 --------------------------------------------------------------------------------
 
 -- | Main decode loop: read stream -> decode -> queue to SDL2. Uses
--- non-blocking stream reads when the SDL queue is healthy, falling back to
--- blocking reads only when the queue runs low. This prevents freezing on
--- network stalls while keeping the device fed.
+-- non-blocking stream reads when the SDL queue is healthy, falling
+-- back to blocking reads only when the queue runs low. This
+-- prevents freezing on network stalls while keeping the device fed.
 decodeLoop
   :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
   => Int  -- ^ accumulated decoded bytes so far
@@ -344,9 +292,9 @@ decodeLoop accBytes = do
       _ -> do
         -- Volume commands are applied inline without breaking playback.
         case peekedCmd of
-          Just (CmdVolume vol) -> liftIO $ do
-            void $ STM.atomically $ STM.tryReadTChan cmdChan
-            STM.atomically $ STM.writeTVar volumeVar vol
+          Just (CmdVolume vol) -> do
+            liftIO $ void $ STM.atomically $ STM.tryReadTChan cmdChan
+            liftIO $ STM.atomically $ STM.writeTVar volumeVar vol
           _ -> pure ()
 
         extraChunks <- liftIO $ Stream.drainStreamChunks streamHandle
@@ -518,53 +466,6 @@ drainChunks mAcc' chunks = case chunks of
       Nothing -> pure Nothing
       Just a  -> processChunk c a
     drainChunks m cs
-
--- | Queue PCM data to SDL2 audio device using raw queueAudio.
--- Returns 0 on success, -1 on error (SDL_GetError for details).
-queueToDevice :: Word32 -> ByteString -> IO CInt
-queueToDevice devId bs = do
-  let bufSize = fromIntegral (BS.length bs) :: Word32
-  BS.useAsCString bs $ \cstr ->
-    SDLRaw.queueAudio devId (castPtr cstr) bufSize
-
--- | Apply volume to PCM 16-bit signed little-endian samples.
--- Uses pointer-based processing (unsafeCreate) to avoid list allocation
--- and GC pressure that caused audio stuttering.
---
--- Lives in 'IO' because the body calls 'unsafeCreate'; the early-return
--- branches are constant-time and allocation-free.
-adjustVolume :: ByteString -> Double -> IO ByteString
-adjustVolume bs volFactor
-  | volFactor >= 1.0 = pure bs
-  | volFactor <= 0.0 = pure (BS.replicate (BS.length bs) 0)
-  | otherwise = unsafeUseAsCString bs $ \src ->
-      let len     = BS.length bs
-          halfLen = len `div` 2
-          volD    = CDouble volFactor
-      in pure (unsafeCreate len $ \dst -> do
-        let go i
-              | i >= halfLen = pure ()
-              | otherwise = do
-                  w <- peekByteOff src (i * 2) :: IO Word16
-                  let unsigned = fromIntegral w :: Int
-                      signed   = if unsigned >= 0x8000
-                                   then unsigned - 0x10000
-                                   else unsigned
-                      adjusted = fromIntegral
-                        (round (fromIntegral signed * volD) :: Int) :: Word16
-                  pokeByteOff dst (i * 2) adjusted
-                  go (i + 1)
-        go 0)
-
--- | Drain all remaining items from a channel
-drainChan :: STM.TChan a -> IO ()
-drainChan chan = STM.atomically $ go
-  where
-    go = do
-      mb <- STM.tryReadTChan chan
-      case mb of
-        Nothing -> pure ()
-        Just _  -> go
 
 --------------------------------------------------------------------------------
 -- Public API
