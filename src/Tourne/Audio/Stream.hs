@@ -8,7 +8,7 @@ module Tourne.Audio.Stream
 
 import Relude hiding (hFlush)
 import Control.Concurrent (forkIO)
-import Control.Exception (try)
+import Control.Exception.Safe (tryAny)
 import Network.HTTP.Client qualified as HC
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BSC
@@ -38,7 +38,7 @@ data StreamHandle = StreamHandle
 
 openStream :: Text -> IO (Either AppError StreamHandle)
 openStream urlText = do
-  result <- try $ do
+  result <- tryAny $ do
     chan     <- STM.newTChanIO
     errRef   <- IORef.newIORef Nothing
     cancelRef <- IORef.newIORef False
@@ -60,7 +60,7 @@ openStream urlText = do
     -- Fork thread to stream data
     _ <- forkIO $ do
       -- Open streaming connection
-      streamResult <- try $ do
+      streamResult <- tryAny $ do
         let streamingReq = req { HC.checkResponse = \_ _ -> pure () }
         HC.withResponse streamingReq mgr \response -> do
           let bodyReader = HC.responseBody response
@@ -80,7 +80,7 @@ openStream urlText = do
               hPutStrLn stderr ("[feed] icy-metaint=" <> show icyMetaint)
           feedStream bodyReader chan cancelRef icyMetaint
       case streamResult of
-        Left (e :: SomeException) -> do
+        Left e -> do
           IORef.writeIORef errRef (Just $ show e)
           STM.atomically $ STM.writeTChan chan BS.empty
         Right _ -> pure ()
@@ -100,7 +100,7 @@ openStream urlText = do
 
   case result of
     Right handle -> pure (Right handle)
-    Left (e :: SomeException) -> pure (Left (StreamError (show e)))
+    Left e -> pure (Left (StreamError (show e)))
 
 -- | Strip ICY metadata blocks from a byte stream chunk.
 -- Takes the metadata interval, remaining bytes before next metadata boundary,

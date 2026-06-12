@@ -7,7 +7,7 @@ module Tourne.PingChecker
 import Relude
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, cancel)
-import Control.Exception (try)
+import Control.Exception.Safe (tryAny)
 import Control.Concurrent.STM qualified as STM
 import Network.HTTP.Client qualified as HC
 import Network.HTTP.Simple (parseRequest, setRequestHeader, httpNoBody)
@@ -133,7 +133,7 @@ sleepResponsively cancelVar totalMicros = go totalMicros
 -- a recoverable error).
 pingStation :: String -> Int -> IO (Either AppError Double)
 pingStation url responseMicros = do
-  result <- try $ do
+  result <- tryAny $ do
     start <- getCurrentTime
     request <- parseRequest url
     let req = setRequestHeader hUserAgent ["TourneRadio/0.1.0"] request
@@ -146,4 +146,4 @@ pingStation url responseMicros = do
     pure diff
   case result of
     Right ping -> pure (Right ping)
-    Left (e :: SomeException) -> pure (Left (HttpError (show e)))
+    Left e -> pure (Left (HttpError (show e)))

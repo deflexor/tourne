@@ -78,6 +78,7 @@ library
     , microlens-th         >= 0.4     && < 0.5
     , directory            >= 1.3     && < 1.4
     , case-insensitive     >= 1.2     && < 1.3
+    , safe-exceptions      >= 0.1     && < 0.2
 
 
   pkgconfig-depends:
@@ -114,6 +115,7 @@ test-suite tourne-test
     Tourne.Test.Persistence
     Tourne.Test.Mpg123
     Tourne.Test.Error
+    Tourne.Test.SafeExceptions
     Tourne.Test.Util
   build-depends:
     , base
@@ -123,6 +125,8 @@ test-suite tourne-test
     , bytestring
     , containers
     , unordered-containers
+    , async          >= 2.2    && < 2.3
     , tasty          >= 1.4    && < 1.6
     , tasty-hunit    >= 0.10   && < 0.11
     , HUnit          >= 1.6    && < 1.7
+    , safe-exceptions >= 0.1   && < 0.2

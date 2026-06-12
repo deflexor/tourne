@@ -6,7 +6,7 @@ module Tourne.RadioBrowser
   ) where
 
 import Relude
-import Control.Exception (try)
+import Control.Exception.Safe (tryAny)
 import Network.HTTP.Conduit qualified as HTTP
 import Network.HTTP.Simple
   ( httpJSON, parseRequest, setRequestQueryString
@@ -61,7 +61,7 @@ jsonHeader = [(hUserAgent, "TourneRadio/0.1.0")]
 apiGet :: FromJSON a => Text -> Text -> IO (Either AppError a)
 apiGet base path = do
   let url = base <> path
-  result <- try $ do
+  result <- tryAny $ do
     initReq <- parseRequest (toString url)
     let req = initReq { HTTP.requestHeaders = jsonHeader }
     mgr <- getSharedManager
@@ -70,7 +70,7 @@ apiGet base path = do
   case result of
     Right (Right val) -> pure (Right val)
     Right (Left parseErr) -> pure (Left (JsonParseError (toText parseErr)))
-    Left (e :: SomeException) -> pure (Left (HttpError (show e)))
+    Left e -> pure (Left (HttpError (show e)))
 
 --------------------------------------------------------------------------------
 -- Tag fetching
