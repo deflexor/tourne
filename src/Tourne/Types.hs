@@ -180,6 +180,17 @@ sortStations mode = case mode of
       (Just pa, Just pb) -> compare pa pb
 
 --------------------------------------------------------------------------------
+-- Station lookup
+--------------------------------------------------------------------------------
+
+-- | Find a station in a list by 'stationId'. O(n) per call; intended
+-- for short, infrequently-traversed lists. For the per-frame TUI
+-- hot path, consider a 'HashMap StationId Station' index (see
+-- bead @tourne-ivm@ for the follow-up).
+lookupStation :: [Station] -> StationId -> Maybe Station
+lookupStation stations sid = find (\s -> stationId s == sid) stations
+
+--------------------------------------------------------------------------------
 -- Player state
 --------------------------------------------------------------------------------
 

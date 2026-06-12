@@ -77,7 +77,7 @@ handleEvent ev = case ev of
             Just t  -> HashMap.insert t stations (appStationsByTag s)
         }
       case (shouldResume, mSelected, mResumeUrl) of
-        (True, Just sid, Just url) -> case find (\st -> stationId st == sid) stations of
+        (True, Just sid, Just url) -> case lookupStation stations sid of
           Just stn
             | stationUrl stn == url -> do
                 modifySt $ \s -> s
@@ -293,7 +293,7 @@ handleNormalKey key = case key of
     mSid <- gets appSelectedStation
     stations <- gets appStations
     case mSid of
-      Just sid -> case find (\s -> stationId s == sid) stations of
+      Just sid -> case lookupStation stations sid of
         Just stn -> do
           modifySt $ \s -> s
             { appPlayerState   = Connecting (stationUrl stn)

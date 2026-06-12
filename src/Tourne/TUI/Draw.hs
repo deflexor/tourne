@@ -10,7 +10,6 @@ import Brick.Widgets.Core
   )
 import Brick.Widgets.Center (centerLayer)
 import Brick.Widgets.Border qualified as B
-import Data.List qualified as List
 
 import Tourne.Types
 import Tourne.TUI.Core
@@ -163,7 +162,7 @@ renderStatus st =
     -- Look up currently playing station name
     playingName = case appSelectedStation st of
       Nothing   -> Nothing
-      Just sid  -> fmap stationName $ List.find (\s -> stationId s == sid) (appStations st)
+      Just sid  -> fmap stationName $ lookupStation (appStations st) sid
 
     stateStr = case errMsg of
       Just e  -> " Error: " <> e

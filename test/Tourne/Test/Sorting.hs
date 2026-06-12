@@ -3,7 +3,7 @@ module Tourne.Test.Sorting (tests) where
 
 import Relude
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (testCase, (@?=), assertFailure)
 
 import Tourne.Types
 
@@ -106,6 +106,25 @@ tests =
         names (sortStations SortByPing
                 [justName "charlie", justName "alpha"])
           @?= ["alpha", "charlie"]
+    ]
+  , testGroup "lookupStation"
+    [ testCase "empty list" $
+        lookupStation [] (StationId "x") @?= Nothing
+    , testCase "first match" $
+        lookupStation (fmap justName ["a", "b", "c"]) (StationId "b")
+          @?= Just (justName "b")
+    , testCase "last match" $
+        lookupStation (fmap justName ["a", "b", "c"]) (StationId "a")
+          @?= Just (justName "a")
+    , testCase "missing id" $
+        lookupStation (fmap justName ["a", "b"]) (StationId "x")
+          @?= Nothing
+    , testCase "preserves record fields (round-trip on URL)" $
+        case lookupStation
+               [mkStation "WJZZ" (Just 192) Nothing]
+               (StationId "WJZZ") of
+          Just stn -> stationUrl stn @?= "http://example/WJZZ"
+          Nothing  -> assertFailure "expected to find WJZZ"
     ]
   ]
   ]

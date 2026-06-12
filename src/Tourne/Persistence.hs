@@ -44,7 +44,7 @@ import System.IO.Error (tryIOError)
 import Tourne.Error (AppError (..), renderError)
 import Tourne.Types
   ( AppState (..), Focus (..), ListState (..), Station (..), StationId, Tag
-  , StationSortMode (..)
+  , StationSortMode (..), lookupStation
   )
 
 --------------------------------------------------------------------------------
@@ -244,5 +244,5 @@ appToPersisted s = PersistedState
     -- work even if the stations list isn't loaded yet.
     resumeUrl = case appSelectedStation s of
       Nothing -> Nothing
-      Just sid -> fmap stationUrl (find (\st -> stationId st == sid) (appStations s))
+      Just sid -> fmap stationUrl (lookupStation (appStations s) sid)
 
