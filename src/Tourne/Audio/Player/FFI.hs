@@ -14,6 +14,7 @@ module Tourne.Audio.Player.FFI
     c_sdl_get_queued_audio_size
   , c_sdl_get_audio_device_status
   , c_sdl_pause_audio_device
+  , c_sdl_clear_queued_audio
   , c_sdl_get_error
     -- * Higher-level helpers
   , queueToDevice
@@ -41,6 +42,15 @@ foreign import ccall "SDL_GetAudioDeviceStatus"
 -- Returns 0 on success, -1 on error.
 foreign import ccall "SDL_PauseAudioDevice"
   c_sdl_pause_audio_device :: Word32 -> CInt -> IO CInt
+
+-- | FFI import for SDL_ClearQueuedAudio. Drops any audio that
+-- has been queued for playback (but not yet played) on the device.
+-- Returns nothing; SDL doesn't expose a return value here.
+--
+-- Used when starting a new stream to ensure residual PCM from the
+-- previous stream doesn't bleed into the new playback.
+foreign import ccall "SDL_ClearQueuedAudio"
+  c_sdl_clear_queued_audio :: Word32 -> IO ()
 
 -- | FFI import for SDL_GetError.
 -- Returns a string describing the last SDL error.

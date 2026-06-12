@@ -45,7 +45,8 @@ import Tourne.Audio.Player.State
   ( AudioEngine (..), PlaybackEnv (..), queueSafetyBytes )
 import Tourne.Audio.Player.FFI
   ( c_sdl_get_queued_audio_size, c_sdl_get_audio_device_status
-  , c_sdl_pause_audio_device, c_sdl_get_error, queueToDevice )
+  , c_sdl_pause_audio_device, c_sdl_clear_queued_audio
+  , c_sdl_get_error, queueToDevice )
 import Tourne.Audio.Player.Helpers (adjustVolume, drainChan)
 
 --------------------------------------------------------------------------------
@@ -167,18 +168,26 @@ commandProcessor = do
     , aeDeviceId    = devId
     } <- ask
   let loop = do
-        cancel <- liftIO $ STM.atomically $ STM.readTVar cancelVar
-        unless cancel $ do
           cmd <- liftIO $ STM.atomically $ STM.readTChan cmdChan
           case cmd of
             CmdPlay url -> do
+              -- If a previous playback is running, signal its decode
+              -- loop to exit so we can start the new one. The cancel
+              -- is observed by the decode loop's first action on the
+              -- next iteration. The 'startPlayback' that returns
+              -- will reset cancelVar back to False.
+              liftIO $ STM.atomically $ STM.writeTVar cancelVar True
               liftIO $ STM.atomically $ STM.writeTVar stateVar (Connecting url)
               startPlayback url
               liftIO $ STM.atomically $ STM.writeTVar stateVar Stopped
 
             CmdStop -> do
+              -- Same cancellation pattern as CmdPlay: the running
+              -- decode loop (if any) sees cancel and exits, and the
+              -- cmdThread processes the stop after startPlayback
+              -- returns.
+              liftIO $ STM.atomically $ STM.writeTVar cancelVar True
               liftIO $ STM.atomically $ STM.writeTVar stateVar Stopped
-              liftIO $ drainChan decodedChan
 
             CmdPause -> do
               liftIO $ SDLRaw.pauseAudioDevice devId 1
@@ -209,7 +218,13 @@ startPlayback url = do
     { aeStateVar     = stateVar
     , aeStreamHealth = healthVar
     , aeDeviceId     = devId
+    , aeCancelToken  = cancelVar
     } <- ask
+  -- A previous playback's decode loop may have set cancelVar = True
+  -- to signal the cmdThread to interrupt it. By the time we get
+  -- here, the previous startPlayback has already returned, so it's
+  -- safe to reset the flag for the new decode loop.
+  liftIO $ STM.atomically $ STM.writeTVar cancelVar False
   -- Stream feed's debug traces are written directly to stderr from
   -- the forked IO thread, NOT routed through the Tracer effect.
   --
@@ -262,6 +277,14 @@ startPlayback url = do
 
           liftIO $ STM.atomically $ STM.writeTVar stateVar (Buffering 0 bufferTargetBytes)
           liftIO $ STM.atomically $ STM.writeTVar healthVar StreamGood
+
+          -- Drop any PCM bytes still queued from a previous
+          -- playback. Without this, the new stream's first samples
+          -- are appended after the old stream's tail, producing
+          -- audible bleed-through and timing glitches at the
+          -- switchover. Clearing while the device is paused (next
+          -- step) is the documented safe way per the SDL2 API.
+          liftIO $ c_sdl_clear_queued_audio devId
 
           -- Start/resume playback (0 = unpause). Check return value.
           pauseRc <- liftIO $ c_sdl_pause_audio_device devId 0
@@ -322,10 +345,24 @@ decodeLoop accBytes = do
       Just CmdStop -> do
         traceEvent "decode_peek" ["cmd=CmdStop"]
         liftIO $ void $ STM.atomically $ STM.tryReadTChan cmdChan
+        -- Consume the cmd and signal the cmdThread to stop the
+        -- current playback. The cmdProcessor's startPlayback will
+        -- return, the loop will recurse, and CmdStop will be
+        -- processed (which is a no-op now since we already did it).
+        liftIO $ STM.atomically $ STM.writeTVar cancelVar True
       Just CmdQuit -> do
         traceEvent "decode_peek" ["cmd=CmdQuit"]
         liftIO $ void $ STM.atomically $ STM.tryReadTChan cmdChan
-      Just CmdPlay{} -> traceEvent "decode_peek" ["cmd=CmdPlay"]
+        liftIO $ STM.atomically $ STM.writeTVar cancelVar True
+      Just CmdPlay{} -> do
+        -- New station selected. The cmdThread is busy inside
+        -- startPlayback (us), so it cannot process this new CmdPlay
+        -- itself. We self-interrupt: signal cancel, exit the loop,
+        -- let the cmdThread see cancel on the next iteration, and
+        -- then re-enter the loop in commandProcessor where it
+        -- picks up this CmdPlay from the channel.
+        traceEvent "decode_peek" ["cmd=CmdPlay"]
+        liftIO $ STM.atomically $ STM.writeTVar cancelVar True
       _ -> do
         -- Volume commands are applied inline without breaking playback.
         case peekedCmd of
