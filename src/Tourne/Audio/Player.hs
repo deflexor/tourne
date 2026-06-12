@@ -229,8 +229,11 @@ startPlayback url = do
           Stream.closeStream streamHandle
 
         Right decoderHandle -> do
-          -- Pre-buffer target: 2 MB (~12 seconds at 44100/16/2).
-          let bufferTargetBytes = 2097152
+          -- Pre-buffer target: 512 KB (~3 seconds at 44100/16/2).
+          -- A larger value made the user wait too long before
+          -- audio started, especially on connections where the
+          -- radio server throttles to 1-2x the encoded bitrate.
+          let bufferTargetBytes = 524288
 
           liftIO $ STM.atomically $ STM.writeTVar stateVar (Buffering 0 bufferTargetBytes)
           liftIO $ STM.atomically $ STM.writeTVar healthVar StreamGood
@@ -345,6 +348,14 @@ decodeLoop accBytes = do
                     Nothing -> do
                       liftIO $ STM.atomically $ STM.writeTChan decodedChan Nothing
                       traceEvent "stream_end" []
+                      -- Stream is over; exit the decode loop so we
+                      -- don't busy-poll 'queue healthy: sleep 100ms'
+                      -- forever. The audio callback will see
+                      -- 'Nothing' on 'decodedChan' and stop on its
+                      -- own. Without this 'return', the loop falls
+                      -- through into the 'else' branch and spins at
+                      -- 100ms indefinitely.
+                      pure ()
                     Just firstChunk -> do
                       extra <- liftIO $ Stream.drainStreamChunks streamHandle
                       mResult <- processChunks firstChunk extra accBytes

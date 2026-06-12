@@ -161,7 +161,7 @@ feedStream trace bodyReader chan cancelRef metaInterval = do
   startTime <- getCurrentTime
   go BS.empty metaInterval startTime  -- start with full interval before first meta boundary
   where
-    minBatchSize = 32768
+    minBatchSize = 8192
     go acc remaining t0 = do
       cancelled <- IORef.readIORef cancelRef
       if cancelled

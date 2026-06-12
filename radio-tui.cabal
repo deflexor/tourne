@@ -140,6 +140,7 @@ test-suite tourne-test
     , bytestring
     , containers
     , unordered-containers
+    , stm
     , async          >= 2.2    && < 2.3
     , effectful      >= 2.6    && < 2.7
     , effectful-core >= 2.6    && < 2.7
