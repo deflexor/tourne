@@ -41,10 +41,12 @@ data StreamHandle = StreamHandle
 
 openStream :: Manager -> Text -> Trace -> IO (Either AppError StreamHandle)
 openStream mgr urlText trace = do
+  trace "[open] start" [show urlText]
   result <- tryAny $ do
     chan     <- STM.newTChanIO
     errRef   <- IORef.newIORef Nothing
     cancelRef <- IORef.newIORef False
+    trace "[open] pre-parse" []
 
     -- Parse and configure request
     initReq <- HC.parseRequest (toString urlText)
@@ -54,15 +56,19 @@ openStream mgr urlText trace = do
                [ ("User-Agent", "TourneRadio/0.1.0")
                , ("Accept", "*/*")
                ]
-          , HC.responseTimeout = HC.responseTimeoutMicro 30000000
-          }
+           , HC.responseTimeout = HC.responseTimeoutMicro 30000000
+           }
+    trace "[open] post-parse" []
 
     -- Fork thread to stream data
     _ <- forkIO $ do
+      trace "[fork] running" []
       -- Open streaming connection
       streamResult <- tryAny $ do
         let streamingReq = req { HC.checkResponse = \_ _ -> pure () }
+        trace "[fork] pre-withResponse" []
         HC.withResponse streamingReq mgr \response -> do
+          trace "[fork] post-withResponse" []
           let bodyReader = HC.responseBody response
               -- Detect ICY metadata interval from response headers
               icyMetaint = case HC.responseHeaders response of
@@ -80,9 +86,11 @@ openStream mgr urlText trace = do
           feedStream trace bodyReader chan cancelRef icyMetaint
       case streamResult of
         Left e -> do
+          trace "[fork] withResponse threw" [show e]
           IORef.writeIORef errRef (Just $ show e)
           STM.atomically $ STM.writeTChan chan BS.empty
-        Right _ -> pure ()
+        Right _ -> do
+          trace "[fork] withResponse returned" []
 
     pure $ StreamHandle
       { shCancel = do
