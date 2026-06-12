@@ -40,6 +40,7 @@ import Tourne.Error (AppError (..), renderError)
 import Tourne.Audio.Types
 import Tourne.Audio.Decoder qualified as Decoder
 import Tourne.Audio.Stream qualified as Stream
+import Tourne.Effect.Tracer (Tracer, runTracer, traceEvent)
 
 --------------------------------------------------------------------------------
 -- FFI imports
@@ -63,18 +64,6 @@ foreign import ccall "SDL_PauseAudioDevice"
 -- Returns a string describing the last SDL error
 foreign import ccall "SDL_GetError"
   c_sdl_get_error :: IO CString
-
--- | Write a timestamped debug line to stderr. Format:
---   D <elapsed_ms> <label> <key=val> <key=val> ...
-debugLog :: IORef.IORef UTCTime -> Text -> [Text] -> IO ()
-debugLog startRef label fields = when debugEnabled $ do
-  start <- IORef.readIORef startRef
-  now <- getCurrentTime
-  let elapsed = round (realToFrac (diffUTCTime now start) * (1000 :: Double)) :: Int
-      line = "D " <> show elapsed <> " " <> toString label
-           <> " " <> toString (Text.intercalate " " fields)
-  hPutStrLn stderr line
-  hFlush stderr
 
 --------------------------------------------------------------------------------
 -- Audio engine handle
@@ -103,7 +92,6 @@ data AudioEngine = AudioEngine
 data PlaybackEnv = PlaybackEnv
   { peStreamHandle  :: !Stream.StreamHandle
   , peDecoderHandle :: !(Ptr Decoder.Mpg123Handle)
-  , peStartTime     :: !(IORef.IORef UTCTime)
   , peBufferTarget  :: !Int
   }
 
@@ -196,7 +184,11 @@ initAudio = do
             , aeCancelToken   = cancelVar
             , aeLeftoverVar   = leftoverRef
             }
-      _cmdThread <- async $ runEff $ runReader engine commandProcessor
+      tracerStart <- IORef.newIORef =<< getCurrentTime
+      let tracerEnabled = debugEnabled
+      _cmdThread <- async $
+        runEff $ runTracer tracerStart tracerEnabled $
+        runReader engine commandProcessor
 
       pure (Right engine)
 
@@ -207,7 +199,7 @@ initAudio = do
 -- | Background command loop. Reads 'AudioCommand's from the command channel
 -- and dispatches them, running 'startPlayback' for 'CmdPlay'. All shared
 -- state lives in the 'AudioEngine' environment (no parameter threading).
-commandProcessor :: (Reader AudioEngine :> es, IOE :> es) => Eff es ()
+commandProcessor :: (Reader AudioEngine :> es, Tracer :> es, IOE :> es) => Eff es ()
 commandProcessor = do
   AudioEngine
     { aeCancelToken = cancelVar
@@ -252,7 +244,7 @@ commandProcessor = do
 
 -- | Start actual playback of a stream URL using queued audio.
 startPlayback
-  :: (Reader AudioEngine :> es, IOE :> es)
+  :: (Reader AudioEngine :> es, Tracer :> es, IOE :> es)
   => Text
   -> Eff es ()
 startPlayback url = do
@@ -281,25 +273,21 @@ startPlayback url = do
           liftIO $ STM.atomically $ STM.writeTVar stateVar (Buffering 0 bufferTargetBytes)
           liftIO $ STM.atomically $ STM.writeTVar healthVar StreamGood
 
-          -- Timer for debug logging (created before any debugLog calls)
-          startTimeRef <- liftIO $ IORef.newIORef =<< getCurrentTime
-
           -- Start/resume playback (0 = unpause). Check return value.
           pauseRc <- liftIO $ c_sdl_pause_audio_device devId 0
           devStatus <- liftIO $ c_sdl_get_audio_device_status devId
           initQueue <- liftIO $ c_sdl_get_queued_audio_size devId
-          liftIO $ when (pauseRc /= 0) $
-            debugLog startTimeRef "pause_err" ["rc=" <> show pauseRc, "devId=" <> show devId]
-          liftIO $ debugLog startTimeRef "play_start"
+          when (pauseRc /= 0) $
+            traceEvent "pause_err" ["rc=" <> show pauseRc, "devId=" <> show devId]
+          traceEvent "play_start"
             [ "dev_status=" <> show devStatus
             , "queue_size=" <> show initQueue
             ]
 
-          -- Per-playback environment: stream + decoder handles, debug timer.
+          -- Per-playback environment: stream + decoder handles.
           let pbEnv = PlaybackEnv
                 { peStreamHandle  = streamHandle
                 , peDecoderHandle = decoderHandle
-                , peStartTime     = startTimeRef
                 , peBufferTarget  = bufferTargetBytes
                 }
 
@@ -319,7 +307,7 @@ startPlayback url = do
 -- blocking reads only when the queue runs low. This prevents freezing on
 -- network stalls while keeping the device fed.
 decodeLoop
-  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, IOE :> es)
+  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
   => Int  -- ^ accumulated decoded bytes so far
   -> Eff es ()
 decodeLoop accBytes = do
@@ -334,7 +322,6 @@ decodeLoop accBytes = do
     } <- ask
   PlaybackEnv
     { peStreamHandle = streamHandle
-    , peStartTime    = startTimeRef
     , peBufferTarget = bufferTargetBytes
     } <- ask
 
@@ -342,14 +329,13 @@ decodeLoop accBytes = do
   unless cancelled $ do
     peekedCmd <- liftIO $ STM.atomically $ STM.tryPeekTChan cmdChan
     case peekedCmd of
-      Just CmdStop -> liftIO $ do
-        debugLog startTimeRef "decode_peek" ["cmd=CmdStop"]
-        void $ STM.atomically $ STM.tryReadTChan cmdChan
-      Just CmdQuit -> liftIO $ do
-        debugLog startTimeRef "decode_peek" ["cmd=CmdQuit"]
-        void $ STM.atomically $ STM.tryReadTChan cmdChan
-      Just CmdPlay{} -> liftIO $
-        debugLog startTimeRef "decode_peek" ["cmd=CmdPlay"]
+      Just CmdStop -> do
+        traceEvent "decode_peek" ["cmd=CmdStop"]
+        liftIO $ void $ STM.atomically $ STM.tryReadTChan cmdChan
+      Just CmdQuit -> do
+        traceEvent "decode_peek" ["cmd=CmdQuit"]
+        liftIO $ void $ STM.atomically $ STM.tryReadTChan cmdChan
+      Just CmdPlay{} -> traceEvent "decode_peek" ["cmd=CmdPlay"]
       _ -> do
         -- Volume commands are applied inline without breaking playback.
         case peekedCmd of
@@ -385,10 +371,8 @@ decodeLoop accBytes = do
               else pure Nothing
             let qNowKb = fromIntegral qNow `div` 1024 :: Int
             case savedSdlErr of
-              Just err -> liftIO $
-                debugLog startTimeRef "dev_stopped" ["sdl_err=" <> show err, "queue_kb=" <> show qNowKb]
-              Nothing -> liftIO $
-                debugLog startTimeRef "idle" ["queue_kb=" <> show qNowKb, "status=" <> show devStatus]
+              Just err -> traceEvent "dev_stopped" ["sdl_err=" <> show err, "queue_kb=" <> show qNowKb]
+              Nothing -> traceEvent "idle" ["queue_kb=" <> show qNowKb, "status=" <> show devStatus]
 
             when (devStatus /= 0) $
               if qNow < queueSafetyBytes && accBytes > 0
@@ -396,9 +380,9 @@ decodeLoop accBytes = do
                   -- Queue running low (not first iteration): block for data.
                   mbChunk <- liftIO $ Stream.readStreamChunk streamHandle
                   case mbChunk of
-                    Nothing -> liftIO $ do
-                      STM.atomically $ STM.writeTChan decodedChan Nothing
-                      debugLog startTimeRef "stream_end" []
+                    Nothing -> do
+                      liftIO $ STM.atomically $ STM.writeTChan decodedChan Nothing
+                      traceEvent "stream_end" []
                     Just firstChunk -> do
                       extra <- liftIO $ Stream.drainStreamChunks streamHandle
                       mResult <- processChunks firstChunk extra accBytes
@@ -424,7 +408,7 @@ decodeLoop accBytes = do
 -- | Decode and queue a single stream chunk, returning the updated byte
 -- accumulator ('Nothing' on a decode error, which aborts playback).
 processChunk
-  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, IOE :> es)
+  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
   => ByteString -> Int -> Eff es (Maybe Int)
 processChunk chunk acc = do
   AudioEngine
@@ -433,60 +417,59 @@ processChunk chunk acc = do
     , aeVolumeVar   = volumeVar
     , aeDeviceId    = devId
     } <- ask
-  PlaybackEnv{ peDecoderHandle = decoderHandle, peStartTime = startTimeRef } <- ask
-  liftIO $ do
-    t0 <- getCurrentTime
-    frames <- Decoder.mpg123Feed decoderHandle chunk
-    case frames of
-      Left err -> do
-        STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
-        STM.atomically $ STM.writeTChan decodedChan Nothing
-        pure Nothing
-      Right [] -> pure (Just acc)
-      Right frameList -> do
-        t1 <- getCurrentTime
-        let frameBytes = sum (map (BS.length . afPcmData) frameList)
-            newAccum   = acc + frameBytes
-            nFrames    = length frameList
-            decodeMs   = round (realToFrac (diffUTCTime t1 t0) * (1000 :: Double)) :: Int
-            -- Log first frame's format to detect device mismatches
-            fmtInfo = case frameList of
-              []     -> ""
-              (f:_) -> show (afRate f) <> "hz_" <> show (afChannels f) <> "ch"
-        curVol <- STM.atomically $ STM.readTVar volumeVar
-        t2 <- getCurrentTime
-        forM_ frameList $ \frame -> do
-          adjusted <- adjustVolume (afPcmData frame) curVol
-          rc <- queueToDevice devId adjusted
-          when (rc /= 0 && debugEnabled) $ do
-            sdlErr <- c_sdl_get_error >>= peekCString
-            debugLog startTimeRef "queue_err"
-              [ "rc=" <> show rc
-              , "sdl_err=" <> show sdlErr
-              ]
-        t3 <- getCurrentTime
-        let adjustMs = round (realToFrac (diffUTCTime t3 t2) * (1000 :: Double)) :: Int
-        debugLog startTimeRef "process"
-          [ "chunk_kb=" <> show (BS.length chunk `div` 1024)
-          , "frames=" <> show nFrames
-          , "pcm_kb=" <> show (frameBytes `div` 1024)
-          , "decode_ms=" <> show decodeMs
-          , "adjust_ms=" <> show adjustMs
-          , "fmt=" <> fmtInfo
-          ]
-        pure (Just newAccum)
+  PlaybackEnv{ peDecoderHandle = decoderHandle } <- ask
+  t0 <- liftIO getCurrentTime
+  frames <- liftIO $ Decoder.mpg123Feed decoderHandle chunk
+  case frames of
+    Left err -> liftIO $ do
+      STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
+      STM.atomically $ STM.writeTChan decodedChan Nothing
+      pure Nothing
+    Right [] -> pure (Just acc)
+    Right frameList -> do
+      t1 <- liftIO getCurrentTime
+      let frameBytes = sum (map (BS.length . afPcmData) frameList)
+          newAccum   = acc + frameBytes
+          nFrames    = length frameList
+          decodeMs   = round (realToFrac (diffUTCTime t1 t0) * (1000 :: Double)) :: Int
+          -- Log first frame's format to detect device mismatches
+          fmtInfo = case frameList of
+            []     -> ""
+            (f:_) -> show (afRate f) <> "hz_" <> show (afChannels f) <> "ch"
+      curVol <- liftIO $ STM.atomically $ STM.readTVar volumeVar
+      t2 <- liftIO getCurrentTime
+      forM_ frameList $ \frame -> do
+        adjusted <- liftIO $ adjustVolume (afPcmData frame) curVol
+        rc <- liftIO $ queueToDevice devId adjusted
+        when (rc /= 0) $ do
+          sdlErr <- liftIO $ c_sdl_get_error >>= peekCString
+          traceEvent "queue_err"
+            [ "rc=" <> show rc
+            , "sdl_err=" <> show sdlErr
+            ]
+      t3 <- liftIO getCurrentTime
+      let adjustMs = round (realToFrac (diffUTCTime t3 t2) * (1000 :: Double)) :: Int
+      traceEvent "process"
+        [ "chunk_kb=" <> show (BS.length chunk `div` 1024)
+        , "frames=" <> show nFrames
+        , "pcm_kb=" <> show (frameBytes `div` 1024)
+        , "decode_ms=" <> show decodeMs
+        , "adjust_ms=" <> show adjustMs
+        , "fmt=" <> fmtInfo
+        ]
+      pure (Just newAccum)
 
 -- | Process the first chunk plus any additionally-drained chunks, logging the
 -- read/cycle summary. Returns the updated accumulator, queue size, and device
 -- status ('Nothing' if a decode error aborted the batch).
 processChunks
-  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, IOE :> es)
+  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
   => ByteString -> [ByteString] -> Int -> Eff es (Maybe (Int, Word32, CInt))
 processChunks firstChunk extraChunks accBytes = do
   AudioEngine{ aeDeviceId = devId } <- ask
-  PlaybackEnv{ peStartTime = startTimeRef, peBufferTarget = bufferTargetBytes } <- ask
+  PlaybackEnv{ peBufferTarget = bufferTargetBytes } <- ask
   qBefore <- liftIO $ c_sdl_get_queued_audio_size devId
-  liftIO $ debugLog startTimeRef "read"
+  traceEvent "read"
     [ "chunk_kb=" <> show (BS.length firstChunk `div` 1024)
     , "queue_before_kb=" <> show (fromIntegral qBefore `div` 1024 :: Int)
     , "n_chunks=" <> show (1 + length extraChunks)
@@ -507,10 +490,9 @@ processChunks firstChunk extraChunks accBytes = do
           let qAfterKb = fromIntegral qAfter `div` 1024 :: Int
               phase = if acc' < bufferTargetBytes then "buffer" else "play"
           case savedSdlErr of
-            Just err -> liftIO $
-              debugLog startTimeRef "dev_stopped" ["sdl_err=" <> show err, "queue_kb=" <> show qAfterKb]
+            Just err -> traceEvent "dev_stopped" ["sdl_err=" <> show err, "queue_kb=" <> show qAfterKb]
             Nothing -> pure ()
-          liftIO $ debugLog startTimeRef "cycle_end"
+          traceEvent "cycle_end"
             [ "phase=" <> phase
             , "queue_kb=" <> show qAfterKb
             , "n_extra=" <> show (length extraChunks)
@@ -522,7 +504,7 @@ processChunks firstChunk extraChunks accBytes = do
 -- | Drain a list of leftover chunks through 'processChunk', short-circuiting
 -- on the first decode error.
 drainChunks
-  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, IOE :> es)
+  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
   => Maybe Int -> [ByteString] -> Eff es (Maybe Int)
 drainChunks mAcc' chunks = case chunks of
   []     -> pure mAcc'
