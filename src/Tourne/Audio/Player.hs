@@ -23,6 +23,8 @@ import Foreign.C.String (peekCString)
 import Network.HTTP.Client (Manager)
 import System.Directory (doesPathExist)
 import System.Environment qualified as Env
+import System.IO qualified
+import Data.Text qualified
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Data.Char (toLower)
 import Effectful
@@ -208,11 +210,20 @@ startPlayback url = do
     , aeStreamHealth = healthVar
     , aeDeviceId     = devId
     } <- ask
-  -- Extract a Tracer -> IO callback so Stream.openStream (a pure
-  -- IO function called from inside an Eff context) can route its
-  -- debug events through the same Tracer interpreter as the decode
-  -- loop. The withRunInIO unlift captures the Eff's environment.
-  streamTrace <- withRunInIO $ \runInIO -> pure (\l fs -> runInIO (traceEvent l fs))
+  -- Stream feed's debug traces are written directly to stderr from
+  -- the forked IO thread, NOT routed through the Tracer effect.
+  --
+  -- The earlier code used `withRunInIO` to extract a callback that
+  -- re-enters the Eff monad from the fork. Effectful's unlift
+  -- relies on thread-local state; calling it from a fresh `forkIO`
+  -- thread (which has no Effectful state) appears to block in
+  -- practice, leaving the fork silent and the decode loop empty.
+  -- Writing directly to stderr from the fork is safe because the
+  -- fork is plain IO and does not need the Eff.
+  let streamTrace :: Text -> [Text] -> IO ()
+      streamTrace l fs =
+        System.IO.hPutStrLn System.IO.stderr
+          ("F " <> toString l <> " " <> toString (Data.Text.intercalate " " fs))
   -- Likewise, extract the HTTP Manager from the HttpClient effect.
   httpMgr    <- getManager
   streamResult <- liftIO $ Stream.openStream httpMgr url streamTrace
