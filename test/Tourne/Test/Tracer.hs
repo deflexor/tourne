@@ -1,16 +1,19 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -- | Tests for the 'Tracer' effect: no-op interpretation, format,
--- and the start-time formatting.
+-- the start-time formatting, and the cross-thread unlift guard.
 module Tourne.Test.Tracer (tests) where
 
 import Relude
+import Data.List qualified as Data.List
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async qualified as Async
+import Control.Exception.Safe (tryAny)
 import Data.IORef qualified as IORef
 import Data.Time.Clock (getCurrentTime, UTCTime)
-import Effectful (Eff, IOE, runEff, type (:>))
+import Effectful (Eff, IOE, runEff, type (:>), withRunInIO)
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (testCase, (@?=), assertFailure, assertBool)
 
 import Tourne.Effect.Tracer (Tracer, runTracer, runTracerNoop, traceEvent)
 
@@ -100,6 +103,42 @@ testPureNoop = testCase "pure action is a no-op" $ do
   result <- runEff (runTracerNoop (pure ()))
   result @?= ()
 
+-- | A 'Trace' callback extracted via 'withRunInIO' is NOT safe to
+-- call from a freshly forked OS thread: Effectful's unlift captures
+-- the calling thread's context via 'seqUnliftIO', which throws
+-- 'HasCallStack' when called from a thread that did not start the
+-- Eff runloop. This regression guard documents the failure mode
+-- so that a future refactor that restores the unlift-based trace
+-- callback in the audio fork thread is caught by the test suite.
+-- The Player.hs workaround is a plain IO callback that writes
+-- directly to stderr, not routed through the Eff.
+testForkThreadUnliftThrows :: TestTree
+testForkThreadUnliftThrows =
+  testCase "unlift callback throws when called from a forkIO thread" $ do
+    startRef <- IORef.newIORef =<< getCurrentTime
+    -- Use Async so the fork's exception is propagated to us.
+    -- forkIO silently swallows thread-local exceptions, but
+    -- Async.wait re-raises them in the calling thread.
+    result <- runEff $ runTracer startRef True $ withRunInIO $ \runInIO ->
+      tryAny $ do
+        let callback = runInIO (traceEvent "from_fork" [])
+        a <- Async.async callback
+        Async.wait a
+    case result of
+      Right _ -> assertFailure $
+        "Expected Effectful's unlift to throw when called from a \
+        \forkIO thread, but the call completed normally. If this \
+        \test fails, Effectful has changed to allow cross-thread \
+        \unlift, and the audio fork can safely route traces \
+        \through the Tracer effect again."
+      Left e ->
+        -- The error message includes 'unlift' or 'thread'; we
+        -- accept any error message that mentions those words.
+        let msg = show e
+        in assertBool
+             ("Expected error to mention unlift/thread, got: " <> msg)
+             (any (`Data.List.isInfixOf` msg) ["unlift", "UnliftStrategy", "thread"])
+
 tests :: [TestTree]
 tests =
   [ testGroup "Tourne.Effect.Tracer"
@@ -111,5 +150,6 @@ tests =
   , testStartTimeConsistent
   , testMultipleEvents
   , testPureNoop
+  , testForkThreadUnliftThrows
   ]
   ]

@@ -213,17 +213,31 @@ startPlayback url = do
   -- Stream feed's debug traces are written directly to stderr from
   -- the forked IO thread, NOT routed through the Tracer effect.
   --
-  -- The earlier code used `withRunInIO` to extract a callback that
-  -- re-enters the Eff monad from the fork. Effectful's unlift
-  -- relies on thread-local state; calling it from a fresh `forkIO`
-  -- thread (which has no Effectful state) appears to block in
-  -- practice, leaving the fork silent and the decode loop empty.
-  -- Writing directly to stderr from the fork is safe because the
-  -- fork is plain IO and does not need the Eff.
+  -- Effectful's `withRunInIO` captures the calling thread's context
+  -- via `seqUnliftIO`, which throws `HasCallStack` when called from
+  -- a thread that did not start the Eff runloop. The forked feed
+  -- thread is a fresh `forkIO` and has no Effectful state, so the
+  -- previous code crashed inside the trace callback with:
+  --
+  --   If you want to use the unlifting function to run Eff
+  --   computations in multiple threads, have a look at
+  --   UnliftStrategy (ConcUnlift).
+  --
+  -- The `tryAny` in `Stream.openStream` caught the exception, set
+  -- `errRef = Just "..."` and wrote `BS.empty` (EOF) to the channel.
+  -- The decode loop saw EOF and exited via the `stream_end` path,
+  -- leaving the player state at `Buffering 0` forever.
+  --
+  -- Writing directly to stderr from the fork is correct: the fork
+  -- is plain IO and does not need the Eff. Gated on `debugEnabled`
+  -- so production is silent unless `TOURNE_DEBUG=1` is set, which
+  -- matches the gating of the in-Eff trace events.
   let streamTrace :: Text -> [Text] -> IO ()
       streamTrace l fs =
-        System.IO.hPutStrLn System.IO.stderr
-          ("F " <> toString l <> " " <> toString (Data.Text.intercalate " " fs))
+        when debugEnabled $
+          System.IO.hPutStrLn System.IO.stderr
+            ("F " <> toString l <> " "
+              <> toString (Data.Text.intercalate " " fs))
   -- Likewise, extract the HTTP Manager from the HttpClient effect.
   httpMgr    <- getManager
   streamResult <- liftIO $ Stream.openStream httpMgr url streamTrace
