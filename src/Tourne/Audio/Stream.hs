@@ -159,7 +159,9 @@ stripIcyMeta interval remaining bs
 feedStream :: Trace -> HC.BodyReader -> STM.TChan ByteString -> IORef.IORef Bool -> Int -> IO ()
 feedStream trace bodyReader chan cancelRef metaInterval = do
   startTime <- getCurrentTime
+  trace "[feed] starting" []
   go BS.empty metaInterval startTime  -- start with full interval before first meta boundary
+  trace "[feed] go returned" []
   where
     minBatchSize = 8192
     go acc remaining t0 = do
@@ -168,12 +170,15 @@ feedStream trace bodyReader chan cancelRef metaInterval = do
         then STM.atomically $ STM.writeTChan chan BS.empty
         else do
           chunk <- HC.brRead bodyReader
+          let nRead = BS.length chunk
+          trace "[feed] brRead" [show nRead <> "B"]
           if BS.null chunk
             then do
               unless (BS.null acc) $ do
                 STM.atomically $ STM.writeTChan chan acc
                 let accKb = BS.length acc `div` 1024
                 trace "feed send final chunk" [show accKb <> "KB"]
+              trace "[feed] EOF" []
               STM.atomically $ STM.writeTChan chan BS.empty  -- Signal end
             else do
               let rawSize = BS.length chunk
