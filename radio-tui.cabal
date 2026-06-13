@@ -33,7 +33,7 @@ common defaults
 
 library
   import:         defaults
-  hs-source-dirs: src
+  hs-source-dirs: src, internal
   exposed-modules:
     Tourne
     Tourne.Error
@@ -48,6 +48,7 @@ library
     Tourne.Failover
     Tourne.Audio.Types
     Tourne.Audio.Stream
+    Tourne.Audio.Stream.Shim
     Tourne.Audio.Decoder
     Tourne.Audio.Player
     Tourne.Audio.Player.FFI
@@ -134,6 +135,7 @@ test-suite tourne-test
     Tourne.Test.Tracer
     Tourne.Test.Util
     Tourne.Test.Decoder
+    Tourne.Test.Stream
     Tourne.Test.Streamly
   build-depends:
     , base

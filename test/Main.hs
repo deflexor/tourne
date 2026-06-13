@@ -11,6 +11,7 @@ import qualified Tourne.Test.HttpClient as HttpClient
 import qualified Tourne.Test.Tracer as Tracer
 import qualified Tourne.Test.Util as Util
 import qualified Tourne.Test.Decoder as Decoder
+import qualified Tourne.Test.Stream as Stream
 import qualified Tourne.Test.Streamly as Streamly
 
 main :: IO ()
@@ -24,5 +25,6 @@ main = defaultMain $ testGroup "Tourne"
   , testGroup "Tourne.Effect.HttpClient" HttpClient.tests
   , testGroup "Tourne.Effect.Tracer" Tracer.tests
   , testGroup "Tourne.Util" Util.tests
+  , testGroup "Tourne.Stream.Shim" Stream.tests
   , testGroup "Tourne.Streamly" Streamly.tests
   ]
