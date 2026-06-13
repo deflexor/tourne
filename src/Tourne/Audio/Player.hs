@@ -312,8 +312,8 @@ startPlayback url = do
                 , peBufferTarget  = bufferTargetBytes
                 }
 
-          -- Run the decode loop with the per-playback env in scope, then clean up.
-          runReader pbEnv (decodeLoop 0)
+          -- Run the pull-based decode loop with the per-playback env in scope.
+          runReader pbEnv (decodeLoopStream 0 (peStream pbEnv))
 
           liftIO $ Decoder.mpg123Close decoderHandle
           liftIO $ Stream.closeStream streamHandle
