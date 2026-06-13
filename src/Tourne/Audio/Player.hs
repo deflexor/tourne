@@ -38,6 +38,9 @@ import Tourne.Error (AppError (..), renderError)
 import Tourne.Audio.Types
 import Tourne.Audio.Decoder qualified as Decoder
 import Tourne.Audio.Stream qualified as Stream
+import Streamly.Data.Stream.Prelude (Stream)
+import qualified Streamly.Data.Stream.Prelude as S
+import qualified Streamly.Data.Fold as Fold
 import Tourne.Audio.Stream.Shim qualified as Stream.Shim
 import Tourne.Effect.Tracer (Tracer, runTracer, traceEvent)
 import Tourne.Effect.HttpClient (HttpClient, runHttpClient, getManager)
@@ -444,6 +447,78 @@ decodeLoop accBytes = do
                   -- Queue healthy: sleep briefly then retry.
                   liftIO $ threadDelay 100000  -- 100ms
                   decodeLoop accBytes
+
+-------------------------------------------------------------------------------
+-- Pull-based decode loop (Streamly)
+-------------------------------------------------------------------------------
+
+-- | New pull-based decode loop that consumes a 'Stream' 'IO' 'ByteString'
+-- directly instead of polling a TChan. Each iteration pulls one chunk
+-- from the stream, decodes it through mpg123, adjusts volume, and
+-- queues the PCM to SDL2. Same logic as 'decodeLoop' but without the
+-- push-based TChan plumbing — the stream's pull semantics handle
+-- back-pressure naturally.
+--
+-- Keeps the same command-peek, cancel, and rate-limiting behaviour as
+-- the legacy loop so the station-switch interrupt still works.
+decodeLoopStream
+  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
+  => Int  -- ^ accumulated decoded bytes so far
+  -> Stream IO ByteString
+  -> Eff es ()
+decodeLoopStream accBytes stream = do
+  AudioEngine{..} <- ask
+  PlaybackEnv{..} <- ask
+
+  cancelled <- liftIO $ STM.atomically $ STM.readTVar aeCancelToken
+  unless cancelled $ do
+    peekedCmd <- liftIO $ STM.atomically $ STM.tryPeekTChan aeCmdChan
+    case peekedCmd of
+      Just CmdStop -> do
+        traceEvent "decode_peek" ["cmd=CmdStop"]
+        liftIO $ void $ STM.atomically $ STM.tryReadTChan aeCmdChan
+        liftIO $ STM.atomically $ STM.writeTVar aeCancelToken True
+      Just CmdQuit -> do
+        traceEvent "decode_peek" ["cmd=CmdQuit"]
+        liftIO $ void $ STM.atomically $ STM.tryReadTChan aeCmdChan
+        liftIO $ STM.atomically $ STM.writeTVar aeCancelToken True
+      Just CmdPlay{} -> do
+        traceEvent "decode_peek" ["cmd=CmdPlay"]
+        liftIO $ STM.atomically $ STM.writeTVar aeCancelToken True
+      _ -> do
+        case peekedCmd of
+          Just (CmdVolume vol) -> do
+            liftIO $ void $ STM.atomically $ STM.tryReadTChan aeCmdChan
+            liftIO $ STM.atomically $ STM.writeTVar aeVolumeVar vol
+          _ -> pure ()
+
+        -- Pull one chunk from the stream
+        (mChunk, rest) <- liftIO $ S.foldBreak Fold.one stream
+        case mChunk of
+          Nothing -> do
+            liftIO $ STM.atomically $ STM.writeTChan aeDecodedChan Nothing
+            traceEvent "stream_end" []
+          Just chunk -> do
+            mAcc <- processChunk chunk accBytes
+            case mAcc of
+              Nothing -> pure ()    -- decode error, abort
+              Just newAcc -> do
+                -- Update state
+                devStatus <- liftIO $ c_sdl_get_audio_device_status aeDeviceId
+                qNow <- liftIO $ c_sdl_get_queued_audio_size aeDeviceId
+                if newAcc < peBufferTarget
+                  then liftIO $
+                    STM.atomically $ STM.writeTVar aeStateVar (Buffering newAcc peBufferTarget)
+                  else do
+                    curVol <- liftIO $ STM.atomically $ STM.readTVar aeVolumeVar
+                    liftIO $ STM.atomically $ STM.writeTVar aeStateVar (Playing curVol)
+                    liftIO $ STM.atomically $ STM.writeTVar aeStreamHealth StreamGood
+
+                -- Rate limit: small delay when the SDL queue is healthy
+                when (qNow >= queueSafetyBytes && devStatus /= 0) $
+                  liftIO $ threadDelay 100000  -- 100ms
+
+                decodeLoopStream newAcc rest
 
 -- | Decode and queue a single stream chunk, returning the updated byte
 -- accumulator ('Nothing' on a decode error, which aborts playback).
