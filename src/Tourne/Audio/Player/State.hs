@@ -23,7 +23,6 @@ import Foreign.Ptr (Ptr)
 import Streamly.Data.Stream.Prelude (Stream)
 
 import Tourne.Audio.Decoder qualified as Decoder
-import Tourne.Audio.Stream qualified as Stream
 import Tourne.Audio.Types (AudioCommand)
 import Tourne.Types (PlayerState, StreamHealth)
 
@@ -43,8 +42,7 @@ data AudioEngine = AudioEngine
 
 -- | Per-playback environment (created fresh for each CmdPlay).
 data PlaybackEnv = PlaybackEnv
-  { peStreamHandle  :: !Stream.StreamHandle
-  , peStream        :: !(Stream IO ByteString)
+  { peStream        :: !(Stream IO ByteString)
   , peDecoderHandle :: !(Ptr Decoder.Mpg123Handle)
   , peBufferTarget  :: !Int
   }

@@ -25,6 +25,6 @@ main = defaultMain $ testGroup "Tourne"
   , testGroup "Tourne.Effect.HttpClient" HttpClient.tests
   , testGroup "Tourne.Effect.Tracer" Tracer.tests
   , testGroup "Tourne.Util" Util.tests
-  , testGroup "Tourne.Stream.Shim" Stream.tests
+  , testGroup "Tourne.Stream" Stream.tests
   , testGroup "Tourne.Streamly" Streamly.tests
   ]

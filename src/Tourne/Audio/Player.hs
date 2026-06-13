@@ -26,7 +26,6 @@ import System.Environment qualified as Env
 import System.IO qualified
 import Data.Text qualified
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
-import Data.Char (toLower)
 import Effectful
 import Effectful.Reader.Static (Reader, runReader, ask)
 import SDL qualified
@@ -41,7 +40,6 @@ import Tourne.Audio.Stream qualified as Stream
 import Streamly.Data.Stream.Prelude (Stream)
 import qualified Streamly.Data.Stream.Prelude as S
 import qualified Streamly.Data.Fold as Fold
-import Tourne.Audio.Stream.Shim qualified as Stream.Shim
 import Tourne.Effect.Tracer (Tracer, runTracer, traceEvent)
 import Tourne.Effect.HttpClient (HttpClient, runHttpClient, getManager)
 
@@ -266,14 +264,10 @@ startPlayback url = do
       STM.atomically $ STM.writeTVar healthVar (StreamLost (renderError err))
 
     Right stream -> do
-      -- Create legacy handle via shim for backward compat.
-      streamHandle <- liftIO $ Stream.Shim.streamToHandleWithUrl stream url
-
       decoderResult <- liftIO Decoder.mpg123Open
       case decoderResult of
-        Left err -> liftIO $ do
+        Left err -> liftIO $
           STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
-          Stream.closeStream streamHandle
 
         Right decoderHandle -> do
           -- Pre-buffer target: 512 KB (~3 seconds at 44100/16/2).
@@ -306,8 +300,7 @@ startPlayback url = do
 
           -- Per-playback environment: stream + decoder handles.
           let pbEnv = PlaybackEnv
-                { peStreamHandle  = streamHandle
-                , peStream        = stream
+                { peStream        = stream
                 , peDecoderHandle = decoderHandle
                 , peBufferTarget  = bufferTargetBytes
                 }
@@ -316,137 +309,13 @@ startPlayback url = do
           runReader pbEnv (decodeLoopStream 0 (peStream pbEnv))
 
           liftIO $ Decoder.mpg123Close decoderHandle
-          liftIO $ Stream.closeStream streamHandle
           liftIO $ SDLRaw.pauseAudioDevice devId 1
 
 --------------------------------------------------------------------------------
 -- Decode loop and chunk processing
 --------------------------------------------------------------------------------
 
--- | Main decode loop: read stream -> decode -> queue to SDL2. Uses
--- non-blocking stream reads when the SDL queue is healthy, falling
--- back to blocking reads only when the queue runs low. This
--- prevents freezing on network stalls while keeping the device fed.
-decodeLoop
-  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
-  => Int  -- ^ accumulated decoded bytes so far
-  -> Eff es ()
-decodeLoop accBytes = do
-  AudioEngine
-    { aeCancelToken  = cancelVar
-    , aeCmdChan      = cmdChan
-    , aeStateVar     = stateVar
-    , aeStreamHealth = healthVar
-    , aeVolumeVar    = volumeVar
-    , aeDecodedChan  = decodedChan
-    , aeDeviceId     = devId
-    } <- ask
-  PlaybackEnv
-    { peStreamHandle = streamHandle
-    , peBufferTarget = bufferTargetBytes
-    } <- ask
 
-  cancelled <- liftIO $ STM.atomically $ STM.readTVar cancelVar
-  unless cancelled $ do
-    peekedCmd <- liftIO $ STM.atomically $ STM.tryPeekTChan cmdChan
-    case peekedCmd of
-      Just CmdStop -> do
-        traceEvent "decode_peek" ["cmd=CmdStop"]
-        liftIO $ void $ STM.atomically $ STM.tryReadTChan cmdChan
-        -- Consume the cmd and signal the cmdThread to stop the
-        -- current playback. The cmdProcessor's startPlayback will
-        -- return, the loop will recurse, and CmdStop will be
-        -- processed (which is a no-op now since we already did it).
-        liftIO $ STM.atomically $ STM.writeTVar cancelVar True
-      Just CmdQuit -> do
-        traceEvent "decode_peek" ["cmd=CmdQuit"]
-        liftIO $ void $ STM.atomically $ STM.tryReadTChan cmdChan
-        liftIO $ STM.atomically $ STM.writeTVar cancelVar True
-      Just CmdPlay{} -> do
-        -- New station selected. The cmdThread is busy inside
-        -- startPlayback (us), so it cannot process this new CmdPlay
-        -- itself. We self-interrupt: signal cancel, exit the loop,
-        -- let the cmdThread see cancel on the next iteration, and
-        -- then re-enter the loop in commandProcessor where it
-        -- picks up this CmdPlay from the channel.
-        traceEvent "decode_peek" ["cmd=CmdPlay"]
-        liftIO $ STM.atomically $ STM.writeTVar cancelVar True
-      _ -> do
-        -- Volume commands are applied inline without breaking playback.
-        case peekedCmd of
-          Just (CmdVolume vol) -> do
-            liftIO $ void $ STM.atomically $ STM.tryReadTChan cmdChan
-            liftIO $ STM.atomically $ STM.writeTVar volumeVar vol
-          _ -> pure ()
-
-        extraChunks <- liftIO $ Stream.drainStreamChunks streamHandle
-        case extraChunks of
-          (firstChunk:moreChunks) -> do
-            mResult <- processChunks firstChunk moreChunks accBytes
-            case mResult of
-              Nothing -> pure ()
-              Just (acc', _, devStatus) ->
-                if devStatus == 0
-                  then pure ()
-                  else if acc' < bufferTargetBytes
-                    then do
-                      liftIO $ STM.atomically $ STM.writeTVar stateVar (Buffering acc' bufferTargetBytes)
-                      decodeLoop acc'
-                    else do
-                      curVol <- liftIO $ STM.atomically $ STM.readTVar volumeVar
-                      liftIO $ STM.atomically $ STM.writeTVar stateVar (Playing curVol)
-                      liftIO $ STM.atomically $ STM.writeTVar healthVar StreamGood
-                      decodeLoop acc'
-
-          [] -> do
-            qNow <- liftIO $ c_sdl_get_queued_audio_size devId
-            devStatus <- liftIO $ c_sdl_get_audio_device_status devId
-            savedSdlErr <- liftIO $ if devStatus == 0
-              then fmap Just (c_sdl_get_error >>= peekCString)
-              else pure Nothing
-            let qNowKb = fromIntegral qNow `div` 1024 :: Int
-            case savedSdlErr of
-              Just err -> traceEvent "dev_stopped" ["sdl_err=" <> show err, "queue_kb=" <> show qNowKb]
-              Nothing -> traceEvent "idle" ["queue_kb=" <> show qNowKb, "status=" <> show devStatus]
-
-            when (devStatus /= 0) $
-              if qNow < queueSafetyBytes && accBytes > 0
-                then do
-                  -- Queue running low (not first iteration): block for data.
-                  mbChunk <- liftIO $ Stream.readStreamChunk streamHandle
-                  case mbChunk of
-                    Nothing -> do
-                      liftIO $ STM.atomically $ STM.writeTChan decodedChan Nothing
-                      traceEvent "stream_end" []
-                      -- Stream is over; exit the decode loop so we
-                      -- don't busy-poll 'queue healthy: sleep 100ms'
-                      -- forever. The audio callback will see
-                      -- 'Nothing' on 'decodedChan' and stop on its
-                      -- own. Without this 'return', the loop falls
-                      -- through into the 'else' branch and spins at
-                      -- 100ms indefinitely.
-                      pure ()
-                    Just firstChunk -> do
-                      extra <- liftIO $ Stream.drainStreamChunks streamHandle
-                      mResult <- processChunks firstChunk extra accBytes
-                      case mResult of
-                        Nothing -> pure ()
-                        Just (acc', _, devStat) ->
-                          if devStat == 0
-                            then pure ()
-                            else do
-                              if acc' < bufferTargetBytes
-                                then liftIO $
-                                  STM.atomically $ STM.writeTVar stateVar (Buffering acc' bufferTargetBytes)
-                                else do
-                                  curVol <- liftIO $ STM.atomically $ STM.readTVar volumeVar
-                                  liftIO $ STM.atomically $ STM.writeTVar stateVar (Playing curVol)
-                                  liftIO $ STM.atomically $ STM.writeTVar healthVar StreamGood
-                              decodeLoop acc'
-                else do
-                  -- Queue healthy: sleep briefly then retry.
-                  liftIO $ threadDelay 100000  -- 100ms
-                  decodeLoop accBytes
 
 -------------------------------------------------------------------------------
 -- Pull-based decode loop (Streamly)
@@ -573,62 +442,8 @@ processChunk chunk acc = do
         , "fmt=" <> fmtInfo
         ]
       pure (Just newAccum)
-
--- | Process the first chunk plus any additionally-drained chunks, logging the
--- read/cycle summary. Returns the updated accumulator, queue size, and device
--- status ('Nothing' if a decode error aborted the batch).
-processChunks
-  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
-  => ByteString -> [ByteString] -> Int -> Eff es (Maybe (Int, Word32, CInt))
-processChunks firstChunk extraChunks accBytes = do
-  AudioEngine{ aeDeviceId = devId } <- ask
-  PlaybackEnv{ peBufferTarget = bufferTargetBytes } <- ask
-  qBefore <- liftIO $ c_sdl_get_queued_audio_size devId
-  traceEvent "read"
-    [ "chunk_kb=" <> show (BS.length firstChunk `div` 1024)
-    , "queue_before_kb=" <> show (fromIntegral qBefore `div` 1024 :: Int)
-    , "n_chunks=" <> show (1 + length extraChunks)
-    ]
-  mAcc <- processChunk firstChunk accBytes
-  case mAcc of
-    Nothing -> pure Nothing
-    Just newAcc -> do
-      finalAcc <- drainChunks (Just newAcc) extraChunks
-      case finalAcc of
-        Nothing -> pure Nothing
-        Just acc' -> do
-          devStatus <- liftIO $ c_sdl_get_audio_device_status devId
-          savedSdlErr <- liftIO $ if devStatus == 0
-            then fmap Just (c_sdl_get_error >>= peekCString)
-            else pure Nothing
-          qAfter <- liftIO $ c_sdl_get_queued_audio_size devId
-          let qAfterKb = fromIntegral qAfter `div` 1024 :: Int
-              phase = if acc' < bufferTargetBytes then "buffer" else "play"
-          case savedSdlErr of
-            Just err -> traceEvent "dev_stopped" ["sdl_err=" <> show err, "queue_kb=" <> show qAfterKb]
-            Nothing -> pure ()
-          traceEvent "cycle_end"
-            [ "phase=" <> phase
-            , "queue_kb=" <> show qAfterKb
-            , "n_extra=" <> show (length extraChunks)
-            , "accum_kb=" <> show (acc' `div` 1024)
-            , "status=" <> show devStatus
-            ]
-          pure (Just (acc', qAfter, devStatus))
-
--- | Drain a list of leftover chunks through 'processChunk', short-circuiting
--- on the first decode error.
-drainChunks
-  :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
-  => Maybe Int -> [ByteString] -> Eff es (Maybe Int)
-drainChunks mAcc' chunks = case chunks of
-  []     -> pure mAcc'
-  (c:cs) -> do
-    m <- case mAcc' of
-      Nothing -> pure Nothing
-      Just a  -> processChunk c a
-    drainChunks m cs
-
+-------------------------------------------------------------------------------
+-- Public API
 --------------------------------------------------------------------------------
 -- Public API
 --------------------------------------------------------------------------------
