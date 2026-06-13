@@ -38,6 +38,7 @@ import Tourne.Error (AppError (..), renderError)
 import Tourne.Audio.Types
 import Tourne.Audio.Decoder qualified as Decoder
 import Tourne.Audio.Stream qualified as Stream
+import Tourne.Audio.Stream.Shim qualified as Stream.Shim
 import Tourne.Effect.Tracer (Tracer, runTracer, traceEvent)
 import Tourne.Effect.HttpClient (HttpClient, runHttpClient, getManager)
 
@@ -255,13 +256,16 @@ startPlayback url = do
               <> toString (Data.Text.intercalate " " fs))
   -- Likewise, extract the HTTP Manager from the HttpClient effect.
   httpMgr    <- getManager
-  streamResult <- liftIO $ Stream.openStream httpMgr url streamTrace
+  streamResult <- liftIO $ Stream.openStream' httpMgr url streamTrace
   case streamResult of
     Left err -> liftIO $ do
       STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
       STM.atomically $ STM.writeTVar healthVar (StreamLost (renderError err))
 
-    Right streamHandle -> do
+    Right stream -> do
+      -- Create legacy handle via shim for backward compat.
+      streamHandle <- liftIO $ Stream.Shim.streamToHandleWithUrl stream url
+
       decoderResult <- liftIO Decoder.mpg123Open
       case decoderResult of
         Left err -> liftIO $ do
@@ -300,6 +304,7 @@ startPlayback url = do
           -- Per-playback environment: stream + decoder handles.
           let pbEnv = PlaybackEnv
                 { peStreamHandle  = streamHandle
+                , peStream        = stream
                 , peDecoderHandle = decoderHandle
                 , peBufferTarget  = bufferTargetBytes
                 }
