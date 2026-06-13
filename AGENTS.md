@@ -82,3 +82,16 @@ bd close <id>         # Complete work
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+## Active Plans
+
+- `docs/plans/streamly-refactor.md` — multi-commit plan to
+  replace `Tourne.Audio.Stream`'s TChan+forkIO+IORef plumbing
+  with a `Streamly.Data.Stream.Prelude.Stream IO ByteString`.
+  Pre-work landed in `dc49e4e` (deps + 5 reference tests in
+  `Tourne.Test.Streamly`). Ready to start.
+
+## Session Notes
+
+Past sessions are recorded in `.tmp/sessions/2026-06-*/context.md`
+(`.tmp/` is gitignored; use the session dir as a handoff).
