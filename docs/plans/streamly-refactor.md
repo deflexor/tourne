@@ -1,8 +1,19 @@
 # Streamly refactor plan
 
-Status: ready to start. Pre-work landed in commit `dc49e4e`
-(streamly + streamly-core deps + 5 reference tests in
-`Tourne.Test.Streamly`).
+Status: **completed**. All 6 commits done.
+
+| Commit | SHA | Description |
+|---|---|---|
+| 1 | `dc49e4e` | Streamly deps + 5 reference tests |
+| 2 | `8c088d2` | StreamHandle shim + `openStream'` |
+| 3 | `37947bd` | `peStream` field in PlaybackEnv |
+| 4 | `f78a5cb` | `decodeLoopStream` function |
+| 5 | `10230b1` | Wire into `startPlayback` |
+| 6 | `f38fcf7` | Remove all legacy TChan/forkIO/StreamHandle code |
+
+Final: 70/70 tests pass. `Tourne.Audio.Stream` exports only `openStream'` + `Trace`.
+`PlaybackEnv` has `peStream` (Stream IO ByteString) instead of `peStreamHandle`.
+Decode loop uses `S.foldBreak Fold.one` for pull-based iteration.
 
 ## Goals
 
