@@ -13,6 +13,7 @@ import qualified Tourne.Test.Util as Util
 import qualified Tourne.Test.Decoder as Decoder
 import qualified Tourne.Test.Stream as Stream
 import qualified Tourne.Test.Streamly as Streamly
+import qualified Tourne.Test.IcyMeta as IcyMeta
 
 main :: IO ()
 main = defaultMain $ testGroup "Tourne"
@@ -20,6 +21,7 @@ main = defaultMain $ testGroup "Tourne"
   , testGroup "Tourne.Persistence" Persistence.tests
   , testGroup "Tourne.Audio.Types.Mpg123" Mpg123.tests
   , testGroup "Tourne.Audio.Decoder" Decoder.tests
+  , testGroup "Tourne.Audio.IcyMeta" IcyMeta.tests
   , testGroup "Tourne.Error" Error.tests
   , testGroup "Tourne.SafeExceptions" SafeExceptions.tests
   , testGroup "Tourne.Effect.HttpClient" HttpClient.tests

@@ -6,19 +6,21 @@ module Tourne.Audio.Player
   , readPlayerState
   , readVolume
   , readStreamHealth
+  , readIcyMetadata
   , AudioCommand (..)
   ) where
 
 import Relude hiding (Reader, runReader, ask, asks, local, MonadReader)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (async)
+import Control.Concurrent.Async (async, cancel)
 import Control.Concurrent.STM qualified as STM
+import Control.Exception.Safe (tryAny)
 import Data.ByteString qualified as BS
 import Data.IORef qualified as IORef
 import Foreign.Ptr (nullFunPtr, nullPtr)
 import Foreign.Storable (poke, peek)
 import Foreign.Marshal.Alloc (alloca)
-import Foreign.C.Types (CInt)
+
 import Foreign.C.String (peekCString)
 import Network.HTTP.Client (Manager)
 import System.Directory (doesPathExist)
@@ -37,16 +39,15 @@ import Tourne.Error (AppError (..), renderError)
 import Tourne.Audio.Types
 import Tourne.Audio.Decoder qualified as Decoder
 import Tourne.Audio.Stream qualified as Stream
-import Streamly.Data.Stream.Prelude (Stream)
 import qualified Streamly.Data.Stream.Prelude as S
 import qualified Streamly.Data.Fold as Fold
 import Tourne.Effect.Tracer (Tracer, runTracer, traceEvent)
 import Tourne.Effect.HttpClient (HttpClient, runHttpClient, getManager)
 
 import Tourne.Audio.Player.State
-  ( AudioEngine (..), PlaybackEnv (..), queueSafetyBytes )
+  ( AudioEngine (..), PlaybackEnv (..) )
 import Tourne.Audio.Player.FFI
-  ( c_sdl_get_queued_audio_size, c_sdl_get_audio_device_status
+  ( c_sdl_get_queued_audio_size
   , c_sdl_pause_audio_device, c_sdl_clear_queued_audio
   , c_sdl_get_error, queueToDevice )
 import Tourne.Audio.Player.Helpers (adjustVolume, drainChan)
@@ -97,6 +98,7 @@ initAudio mgr = do
   chansVar     <- STM.newTVarIO 2
   cancelVar    <- STM.newTVarIO False
   leftoverRef  <- IORef.newIORef BS.empty
+  icyMetaVar   <- STM.newTVarIO Nothing  -- ICY StreamTitle sink
 
   -- Open SDL2 audio device in QUEUE MODE (NULL callback = no callback, use SDL_QueueAudio)
   devResult <- alloca $ \desired ->
@@ -141,6 +143,7 @@ initAudio mgr = do
             , aeDeviceId      = devId
             , aeCancelToken   = cancelVar
             , aeLeftoverVar   = leftoverRef
+            , aeIcyMetaVar    = icyMetaVar
             }
       tracerStart <- IORef.newIORef =<< getCurrentTime
       let tracerEnabled = debugEnabled
@@ -217,10 +220,12 @@ startPlayback
   -> Eff es ()
 startPlayback url = do
   AudioEngine
-    { aeStateVar     = stateVar
+    { aeCmdChan      = cmdChan
+    , aeStateVar     = stateVar
     , aeStreamHealth = healthVar
     , aeDeviceId     = devId
     , aeCancelToken  = cancelVar
+    , aeIcyMetaVar   = icyMetaVar
     } <- ask
   -- A previous playback's decode loop may have set cancelVar = True
   -- to signal the cmdThread to interrupt it. By the time we get
@@ -257,7 +262,11 @@ startPlayback url = do
               <> toString (Data.Text.intercalate " " fs))
   -- Likewise, extract the HTTP Manager from the HttpClient effect.
   httpMgr    <- getManager
-  streamResult <- liftIO $ Stream.openStream' httpMgr url streamTrace
+  -- Reset the ICY metadata sink for the new station. The previous
+  -- station's title shouldn't linger while the new stream's first
+  -- metadata block arrives (which can be many seconds later).
+  liftIO $ STM.atomically $ STM.writeTVar icyMetaVar Nothing
+  streamResult <- liftIO $ Stream.openStream' httpMgr url streamTrace icyMetaVar
   case streamResult of
     Left err -> liftIO $ do
       STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (renderError err))
@@ -271,9 +280,9 @@ startPlayback url = do
 
         Right decoderHandle -> do
           -- Pre-buffer target: 512 KB (~3 seconds at 44100/16/2).
-          -- A larger value made the user wait too long before
-          -- audio started, especially on connections where the
-          -- radio server throttles to 1-2x the encoded bitrate.
+          -- The decode loop will NOT unpause the SDL device until
+          -- this many PCM bytes have been queued, ensuring audio
+          -- starts cleanly with a meaningful buffer.
           let bufferTargetBytes = 524288
 
           liftIO $ STM.atomically $ STM.writeTVar stateVar (Buffering 0 bufferTargetBytes)
@@ -283,33 +292,75 @@ startPlayback url = do
           -- playback. Without this, the new stream's first samples
           -- are appended after the old stream's tail, producing
           -- audible bleed-through and timing glitches at the
-          -- switchover. Clearing while the device is paused (next
-          -- step) is the documented safe way per the SDL2 API.
+          -- switchover.
+          --
+          -- Pause the device first. SDL2's SDL_ClearQueuedAudio
+          -- is documented as safe to call from any thread, but on
+          -- a station switch the previous startPlayback deliberately
+          -- leaves the device unpaused (so the cleanup_switch branch
+          -- can hand off to this call without an audible pause-gap).
+          -- With the device unpaused, the audio thread is actively
+          -- pulling from the queue when we call clear; pausing first
+          -- guarantees the audio thread is idle by the time the
+          -- clear runs. The decode loop will re-unpause via its
+          -- 'device_start' trace event once peBufferTarget PCM has
+          -- been queued.
+          _ <- liftIO $ c_sdl_pause_audio_device devId 1
           liftIO $ c_sdl_clear_queued_audio devId
 
-          -- Start/resume playback (0 = unpause). Check return value.
-          pauseRc <- liftIO $ c_sdl_pause_audio_device devId 0
-          devStatus <- liftIO $ c_sdl_get_audio_device_status devId
-          initQueue <- liftIO $ c_sdl_get_queued_audio_size devId
-          when (pauseRc /= 0) $
-            traceEvent "pause_err" ["rc=" <> show pauseRc, "devId=" <> show devId]
-          traceEvent "play_start"
-            [ "dev_status=" <> show devStatus
-            , "queue_size=" <> show initQueue
-            ]
+          -- Concurrent MP3 buffer: a background thread reads HTTP
+          -- chunks from the stream and pushes them into a TBQueue.
+          -- The decode loop reads from this queue instead of blocking
+          -- on network I/O, smoothing out jitter from the server's
+          -- per-chunk timing (which can vary from 400-700ms).
+          mp3Queue   <- liftIO $ STM.newTBQueueIO 131072  -- 128KB capacity
+          readerDone <- liftIO $ STM.newTVarIO False
+          let goQueue s = do
+                (mChunk, rest) <- S.foldBreak Fold.one s
+                case mChunk of
+                  Nothing -> pure ()
+                  Just c  -> do
+                    STM.atomically $ STM.writeTBQueue mp3Queue c
+                    goQueue rest
+          readerThread <- liftIO $ async $ do
+            result <- tryAny $ goQueue stream
+            STM.atomically $ STM.writeTVar readerDone True
+            case result of
+              Left ex -> do
+                STM.atomically $ STM.writeTVar stateVar (ErrorOccurred (show ex))
+                STM.atomically $ STM.writeTVar healthVar (StreamLost (show ex))
+              Right _ -> pure ()
 
-          -- Per-playback environment: stream + decoder handles.
+          -- Per-playback environment: decoder handle + MP3 queue.
           let pbEnv = PlaybackEnv
-                { peStream        = stream
-                , peDecoderHandle = decoderHandle
+                { peDecoderHandle = decoderHandle
                 , peBufferTarget  = bufferTargetBytes
+                , peMp3Queue      = mp3Queue
+                , peReaderDone    = readerDone
                 }
 
-          -- Run the pull-based decode loop with the per-playback env in scope.
-          runReader pbEnv (decodeLoopStream 0 (peStream pbEnv))
+          -- Run the pull-based decode loop with the per-playback env
+          -- in scope. 'started = False'; the decode loop unpauses
+          -- the device once peBufferTarget PCM has been queued.
+          runReader pbEnv (decodeLoopStream 0 False)
 
+          -- Kill the background reader thread. On normal stream EOF
+          -- the reader has already finished; on station-switch cancel
+          -- the decode loop exited early and the reader is still
+          -- blocked on the HTTP connection, so cancel it explicitly.
+          liftIO $ cancel readerThread
           liftIO $ Decoder.mpg123Close decoderHandle
-          liftIO $ SDLRaw.pauseAudioDevice devId 1
+          -- Only pause the device on natural EOF, stop, or error.
+          -- For a station switch (cancelVar set by CmdPlay), skip the
+          -- pause: the next playback is about to start on the same
+          -- thread and will manage the device state via its own
+          -- decodeLoopStream 'started' flag.  The pending CmdPlay
+          -- is still in the channel (decodeLoopStream peeks but does
+          -- NOT consume it), so we detect it here.
+          pendingPlay <- liftIO $ STM.atomically $ STM.tryPeekTChan cmdChan
+          case pendingPlay of
+            Just CmdPlay{} -> traceEvent "cleanup_switch" []
+            _              -> liftIO $ SDLRaw.pauseAudioDevice devId 1
 
 --------------------------------------------------------------------------------
 -- Decode loop and chunk processing
@@ -321,21 +372,54 @@ startPlayback url = do
 -- Pull-based decode loop (Streamly)
 -------------------------------------------------------------------------------
 
--- | New pull-based decode loop that consumes a 'Stream' 'IO' 'ByteString'
--- directly instead of polling a TChan. Each iteration pulls one chunk
--- from the stream, decodes it through mpg123, adjusts volume, and
--- queues the PCM to SDL2. Same logic as 'decodeLoop' but without the
--- push-based TChan plumbing — the stream's pull semantics handle
--- back-pressure naturally.
+-- | Read chunks from the stream until we have at least @minBytes@ of
+-- data, or until the stream ends. Returns the accumulated bytes and
+-- the remaining stream.
 --
--- Keeps the same command-peek, cancel, and rate-limiting behaviour as
--- the legacy loop so the station-switch interrupt still works.
+-- Feeding larger batches to mpg123 is essential for throughput: the
+-- HTTP 'BodyReader' returns only 1 KB per call, and the per-chunk
+-- decode overhead (STM, state updates, rate limiting) becomes the
+-- bottleneck when processing individual chunks — especially on slower
+-- connections where each \<1 KB trickle is separated by ~400 ms.
+-- | Read from the MP3 queue until we have at least @minBytes@ of
+-- data, or until the reader has finished (EOF or error). The
+-- background reader thread pushes each HTTP chunk into the queue
+-- concurrently, so this function rarely blocks on network I/O.
+gatherFromQueue :: Int -> STM.TBQueue ByteString -> STM.TVar Bool -> IO ByteString
+gatherFromQueue minBytes queue doneVar = go mempty
+  where
+    go acc = do
+      if BS.length acc >= minBytes
+        then pure acc
+        else do
+          mChunk <- STM.atomically $ do
+            done <- STM.readTVar doneVar
+            if done
+              then STM.tryReadTBQueue queue
+              else Just <$> STM.readTBQueue queue
+          case mChunk of
+            Nothing -> pure acc     -- reader done + queue empty
+            Just c  -> let acc' = acc <> c
+                       in acc' `seq` go acc'
+
+-- | Queue-backed decode loop. Each iteration reads from the MP3
+-- queue (filled concurrently by the background reader thread),
+-- decodes through mpg123, adjusts volume, and queues PCM to SDL2.
+-- Unlike the previous stream-based approach, the decode loop never
+-- blocks on network I/O — the background reader handles that.
+--
+-- The @started@ flag tracks whether the SDL device has been
+-- unpaused.  The device stays paused until @peBufferTarget@ PCM
+-- bytes have been queued, giving a clean initial buffer (~3 s).
+--
+-- Keeps the same command-peek, cancel, and rate-limiting behaviour
+-- as the legacy loop so the station-switch interrupt still works.
 decodeLoopStream
   :: (Reader AudioEngine :> es, Reader PlaybackEnv :> es, Tracer :> es, IOE :> es)
-  => Int  -- ^ accumulated decoded bytes so far
-  -> Stream IO ByteString
+  => Int    -- ^ accumulated decoded bytes so far
+  -> Bool   -- ^ whether the SDL device has been unpaused yet
   -> Eff es ()
-decodeLoopStream accBytes stream = do
+decodeLoopStream accBytes started = do
   AudioEngine{..} <- ask
   PlaybackEnv{..} <- ask
 
@@ -354,6 +438,23 @@ decodeLoopStream accBytes stream = do
       Just CmdPlay{} -> do
         traceEvent "decode_peek" ["cmd=CmdPlay"]
         liftIO $ STM.atomically $ STM.writeTVar aeCancelToken True
+      -- | Pause: consume the command, pause the SDL device, then
+      -- block in a poll loop until Resume, Stop, Quit, Play, or Volume
+      -- arrives.  The poll loop runs on the same thread as the decode
+      -- loop (because commandProcessor is blocked inside us), so it
+      -- reads from aeCmdChan directly via tryReadTChan.
+      Just CmdPause -> do
+        traceEvent "decode_peek" ["cmd=CmdPause"]
+        liftIO $ void $ STM.atomically $ STM.tryReadTChan aeCmdChan
+        resumed <- liftIO $ handlePause_ aeDeviceId aeCmdChan aeStateVar
+                    aeVolumeVar aeCancelToken aeStreamHealth
+        if resumed
+          then decodeLoopStream accBytes started
+          else pure ()
+      -- | Resume while not paused: consume and ignore.
+      Just CmdResume -> do
+        traceEvent "decode_peek" ["cmd=CmdResume"]
+        liftIO $ void $ STM.atomically $ STM.tryReadTChan aeCmdChan
       _ -> do
         case peekedCmd of
           Just (CmdVolume vol) -> do
@@ -361,20 +462,84 @@ decodeLoopStream accBytes stream = do
             liftIO $ STM.atomically $ STM.writeTVar aeVolumeVar vol
           _ -> pure ()
 
-        -- Pull one chunk from the stream
-        (mChunk, rest) <- liftIO $ S.foldBreak Fold.one stream
-        case mChunk of
-          Nothing -> do
+        -- Rate limit: check SDL queue depth BEFORE decoding another
+        -- chunk. Once the queue exceeds 5 seconds of audio at the
+        -- actual SDL device rate, we add a proportional delay so the
+        -- decode loop slows to match real-time consumption, preventing
+        -- unbounded queue growth.
+        --
+        -- The 5-second threshold and the per-128-KB-block delay are
+        -- both scaled by the actual rate from aeRateVar (captured in
+        -- the obtained AudioSpec at device open). If the OS audio
+        -- server (e.g. WSLG PulseAudio) opens the device at a slightly
+        -- different rate than 44100 Hz, the rate limiter calibrates
+        -- to the real consumption rate rather than a hardcoded
+        -- assumption — this stops the queue from oscillating when
+        -- the actual rate is e.g. 87 % of 44100 Hz.
+        --
+        -- The 1 s cap on per-iteration delay is preserved: that's
+        -- already enough to drain ~5 s of audio at any reasonable
+        -- rate, so longer delays would just stall the decode loop.
+        qBefore <- liftIO $ c_sdl_get_queued_audio_size aeDeviceId
+        actualRate  <- liftIO $ STM.atomically $ STM.readTVar aeRateVar
+        actualChans <- liftIO $ STM.atomically $ STM.readTVar aeChannelsVar
+        let sdlBytesPerSec = fromIntegral actualRate * fromIntegral actualChans * 2
+            safetyBytes    = floor (sdlBytesPerSec * 5) :: Int
+        when (fromIntegral qBefore >= safetyBytes) $ do
+          let rateScaleNum   = 44100 :: Int
+              rateScaleDen   = max 1 actualRate
+              excessBytes    = fromIntegral qBefore - safetyBytes
+              excess128KB    = max 1 (excessBytes `div` 131072 + 1)
+              perBlockDelayUs = (rateScaleNum * 100000) `div` rateScaleDen
+              delayUs        = min 1000000 (excess128KB * perBlockDelayUs)
+          traceEvent "rate_limit"
+            [ "q_kb=" <> show (qBefore `div` 1024)
+            , "delay_ms=" <> show (delayUs `div` 1000)
+            , "actual_rate=" <> show actualRate
+            , "safety_kb=" <> show (safetyBytes `div` 1024)
+            ]
+          liftIO $ threadDelay delayUs
+
+        -- Read from the MP3 queue (filled concurrently by the
+        -- background reader thread). The queue decouples decode from
+        -- network I/O, smoothing out per-chunk timing jitter.
+        let minBatch = 8192
+        batch <- liftIO $ gatherFromQueue minBatch peMp3Queue peReaderDone
+        if BS.null batch
+          then do
             liftIO $ STM.atomically $ STM.writeTChan aeDecodedChan Nothing
             traceEvent "stream_end" []
-          Just chunk -> do
-            mAcc <- processChunk chunk accBytes
+          else do
+            mAcc <- processChunk batch accBytes
             case mAcc of
               Nothing -> pure ()    -- decode error, abort
               Just newAcc -> do
-                -- Update state
-                devStatus <- liftIO $ c_sdl_get_audio_device_status aeDeviceId
-                qNow <- liftIO $ c_sdl_get_queued_audio_size aeDeviceId
+                -- Pre-buffer: keep the SDL device paused until we have
+                -- enough PCM queued. This ensures audio starts with a
+                -- meaningful buffer (~3 s) rather than trickling in.
+                -- Also log the actual SDL device rate on first
+                -- unpause, so any sample-rate mismatch shows up in
+                -- the trace instead of being inferred from queue
+                -- oscillation.
+                unless started $ do
+                  when (newAcc >= peBufferTarget) $ do
+                    actualRate  <- liftIO $ STM.atomically $ STM.readTVar aeRateVar
+                    actualChans <- liftIO $ STM.atomically $ STM.readTVar aeChannelsVar
+                    let sdlBytesPerSec = fromIntegral actualRate * fromIntegral actualChans * 2
+                        safetyBytes    = floor (sdlBytesPerSec * 5) :: Int
+                    traceEvent "device_start"
+                      [ "queued_kb=" <> show (newAcc `div` 1024)
+                      , "actual_rate=" <> show actualRate
+                      , "actual_chans=" <> show actualChans
+                      , "safety_kb=" <> show (safetyBytes `div` 1024)
+                      ]
+                    _ <- liftIO $ c_sdl_pause_audio_device aeDeviceId 0
+                    pure ()
+
+                -- Update state based on accumulated PCM bytes.
+                -- (Queue depth is checked before the next gather
+                -- call, not here, so the rate limiter prevents growth
+                -- rather than reacting to it.)
                 if newAcc < peBufferTarget
                   then liftIO $
                     STM.atomically $ STM.writeTVar aeStateVar (Buffering newAcc peBufferTarget)
@@ -383,11 +548,69 @@ decodeLoopStream accBytes stream = do
                     liftIO $ STM.atomically $ STM.writeTVar aeStateVar (Playing curVol)
                     liftIO $ STM.atomically $ STM.writeTVar aeStreamHealth StreamGood
 
-                -- Rate limit: small delay when the SDL queue is healthy
-                when (qNow >= queueSafetyBytes && devStatus /= 0) $
-                  liftIO $ threadDelay 100000  -- 100ms
+                let started' = started || newAcc >= peBufferTarget
+                decodeLoopStream newAcc started'
 
-                decodeLoopStream newAcc rest
+-- | Block in a polling loop while the SDL device is paused. Reads
+-- commands from @aeCmdChan@ directly (the commandProcessor is blocked
+-- inside the decode loop and cannot dispatch them). Returns 'True'
+-- if the caller should resume decoding (CmdResume received), 'False'
+-- if the caller should exit (cancel token was set).
+--
+-- The polling interval is deliberately short (100 ms) so that
+-- pause/unpause feels responsive; the thread is doing no real work
+-- while paused.
+handlePause_
+  :: Word32                    -- ^ SDL device ID
+  -> STM.TChan AudioCommand   -- ^ command channel (polled for Resume/Stop/Play)
+  -> STM.TVar PlayerState     -- ^ player state TVar
+  -> STM.TVar Double          -- ^ volume TVar
+  -> STM.TVar Bool            -- ^ cancel token TVar
+  -> STM.TVar StreamHealth    -- ^ stream health TVar
+  -> IO Bool                  -- ^ True = resumed, False = cancelled/quit
+handlePause_ devId cmdChan stateVar volumeVar cancelVar healthVar = do
+  STM.atomically $ STM.writeTVar stateVar Paused
+  let poll = do
+        mbCmd <- STM.atomically $ STM.tryReadTChan cmdChan
+        case mbCmd of
+          Just CmdResume -> do
+            when debugEnabled $
+              System.IO.hPutStrLn System.IO.stderr "D pause_resume []"
+            curVol <- STM.atomically $ STM.readTVar volumeVar
+            _ <- c_sdl_pause_audio_device devId 0
+            STM.atomically $ STM.writeTVar stateVar (Playing curVol)
+            STM.atomically $ STM.writeTVar healthVar StreamGood
+            pure True
+          Just CmdStop -> do
+            when debugEnabled $
+              System.IO.hPutStrLn System.IO.stderr "D pause_stop []"
+            STM.atomically $ STM.writeTVar cancelVar True
+            pure False
+          Just CmdQuit -> do
+            when debugEnabled $
+              System.IO.hPutStrLn System.IO.stderr "D pause_quit []"
+            STM.atomically $ STM.writeTVar cancelVar True
+            pure False
+          Just CmdPlay{} -> do
+            -- Do NOT consume CmdPlay from the channel: commandProcessor
+            -- must see it after decodeLoopStream returns so it can
+            -- call startPlayback with the new URL.  We only set the
+            -- cancel token so the decode loop exits and control
+            -- returns to commandProcessor.
+            when debugEnabled $
+              System.IO.hPutStrLn System.IO.stderr "D pause_play []"
+            STM.atomically $ STM.writeTVar cancelVar True
+            pure False
+          Just CmdPause -> do
+            -- Already paused; consume and loop
+            poll
+          Just (CmdVolume vol) -> do
+            STM.atomically $ STM.writeTVar volumeVar (min 1.0 $ max 0.0 vol)
+            poll
+          Nothing -> do
+            threadDelay 100000
+            poll
+  poll
 
 -- | Decode and queue a single stream chunk, returning the updated byte
 -- accumulator ('Nothing' on a decode error, which aborts playback).
@@ -417,20 +640,23 @@ processChunk chunk acc = do
           nFrames    = length frameList
           decodeMs   = round (realToFrac (diffUTCTime t1 t0) * (1000 :: Double)) :: Int
           -- Log first frame's format to detect device mismatches
-          fmtInfo = case frameList of
-            []     -> ""
-            (f:_) -> show (afRate f) <> "hz_" <> show (afChannels f) <> "ch"
+          (f:_)   = frameList
+          fmtInfo = show (afRate f) <> "hz_" <> show (afChannels f) <> "ch"
       curVol <- liftIO $ STM.atomically $ STM.readTVar volumeVar
       t2 <- liftIO getCurrentTime
-      forM_ frameList $ \frame -> do
-        adjusted <- liftIO $ adjustVolume (afPcmData frame) curVol
-        rc <- liftIO $ queueToDevice devId adjusted
-        when (rc /= 0) $ do
-          sdlErr <- liftIO $ c_sdl_get_error >>= peekCString
-          traceEvent "queue_err"
-            [ "rc=" <> show rc
-            , "sdl_err=" <> show sdlErr
-            ]
+      -- Concatenate all frames' PCM into one buffer: avoids N FFI calls
+      -- and N ByteString allocations from adjustVolume, reducing GC
+      -- pressure and queue overhead. mconcat is a no-copy spine walk
+      -- for the common case of a handful of frames (~4608 bytes each).
+      let allPcm = mconcat (map afPcmData frameList)
+      adjusted <- liftIO $ adjustVolume allPcm curVol
+      rc <- liftIO $ queueToDevice devId adjusted
+      when (rc /= 0) $ do
+        sdlErr <- liftIO $ c_sdl_get_error >>= peekCString
+        traceEvent "queue_err"
+          [ "rc=" <> show rc
+          , "sdl_err=" <> show sdlErr
+          ]
       t3 <- liftIO getCurrentTime
       let adjustMs = round (realToFrac (diffUTCTime t3 t2) * (1000 :: Double)) :: Int
       traceEvent "process"
@@ -463,6 +689,15 @@ readVolume engine =
 readStreamHealth :: AudioEngine -> IO StreamHealth
 readStreamHealth engine =
   STM.atomically $ STM.readTVar (aeStreamHealth engine)
+
+-- | Read the most recently parsed ICY 'StreamTitle' from the
+-- currently playing stream, if any. Returns 'Nothing' when the
+-- stream hasn't sent a metadata block yet, or when it explicitly
+-- sent an empty value. The title is reset to 'Nothing' on each
+-- new 'CmdPlay' (see 'startPlayback').
+readIcyMetadata :: AudioEngine -> IO (Maybe Text)
+readIcyMetadata engine =
+  STM.atomically $ STM.readTVar (aeIcyMetaVar engine)
 
 closeAudio :: AudioEngine -> IO ()
 closeAudio engine = do

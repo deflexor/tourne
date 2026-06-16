@@ -47,6 +47,7 @@ library
     Tourne.AdDetection
     Tourne.Failover
     Tourne.Audio.Types
+    Tourne.Audio.IcyMeta
     Tourne.Audio.Stream
     Tourne.Audio.Decoder
     Tourne.Audio.Player
@@ -135,6 +136,7 @@ test-suite tourne-test
     Tourne.Test.Decoder
     Tourne.Test.Stream
     Tourne.Test.Streamly
+    Tourne.Test.IcyMeta
   build-depends:
     , base
     , tourne
@@ -142,6 +144,7 @@ test-suite tourne-test
     , aeson
     , bytestring
     , containers
+    , http-types     >= 0.12   && < 0.13
     , unordered-containers
     , stm
     , async          >= 2.2    && < 2.3
