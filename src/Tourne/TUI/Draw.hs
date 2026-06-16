@@ -35,8 +35,14 @@ drawUI st =
 
     content = hBox [tagsPane, stationsPane]
     statusBar = renderStatus st
+    nowPlaying = renderNowPlaying st
     helpLine  = renderHelp st
-    baseLayout = vBox [content, statusBar, helpLine]
+    -- The now-playing row sits between the status bar and the
+    -- keyboard-hint line. When a song is playing, it scrolls long
+    -- titles horizontally at 1 char/sec (driven by EvTick from
+    -- Main.hs). When no metadata is available, the row is a single
+    -- space so the layout doesn't visibly change.
+    baseLayout = vBox [content, statusBar, nowPlaying, helpLine]
 
     -- The search prompt is a single-line full-width banner at the top
     -- of the screen. It occupies one row when open; the base layout is
@@ -197,6 +203,43 @@ volBar vol =
       bars = Text.replicate n "|"
       dots = Text.replicate (10 - n) "."
   in " [" <> bars <> dots <> "]"
+
+--------------------------------------------------------------------------------
+-- Now-playing row (ICY StreamTitle)
+--------------------------------------------------------------------------------
+
+-- | Width of the now-playing pane in characters. The terminal
+-- itself may be wider, but Brick auto-extends the underlying
+-- widget to fill the row; this width just controls how many
+-- characters of the title we display at any one time. Long
+-- titles scroll horizontally via 'appNowPlayingScroll' (advanced
+-- once per second by 'EvTick').
+nowPlayingWidth :: Int
+nowPlayingWidth = 80
+
+-- | Render the now-playing row. Shows the current ICY 'StreamTitle'
+-- if available, with horizontal scrolling for long titles. When
+-- no metadata is available (no station playing, station hasn't
+-- sent metadata yet, or the title is empty) the row is a single
+-- space so the layout doesn't visibly shift.
+renderNowPlaying :: AppState -> Widget AppName
+renderNowPlaying st =
+  case appIcyMetadata st of
+    Nothing  -> txt " "
+    Just ""  -> txt " "
+    Just title ->
+      let tlen   = Text.length title
+          scroll = appNowPlayingScroll st
+          -- For titles longer than the pane, we want a wrap-around
+          -- scroll. Concatenating the title with itself gives an
+          -- infinite text strip the offset can travel along
+          -- without bounds. The @mod tlen@ keeps the offset small.
+          effectiveOffset = if tlen > 0 then scroll `mod` tlen else 0
+          doubled = title <> title
+          visible = Text.take nowPlayingWidth
+                      (Text.drop effectiveOffset doubled)
+          line = " \9835 " <> visible  -- \9835 = musical note
+      in withAttr playingAttr (txt line)
 
 progressBar :: Int -> Int -> Text
 progressBar cur total

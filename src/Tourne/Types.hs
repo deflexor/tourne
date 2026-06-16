@@ -259,6 +259,20 @@ data AppState = AppState
   , appAdState           :: !AdState
   , appFailoverState     :: !FailoverState
   , appStreamHealth      :: !StreamHealth
+  , appIcyMetadata       :: !(Maybe Text)
+  -- ^ 'Just title' when the currently playing station has sent an
+  --   ICY 'StreamTitle' block and the parser produced a value;
+  --   'Nothing' otherwise (no metadata yet, or the title is empty,
+  --   or no station is playing). Reset to 'Nothing' on every
+  --   station switch. Updated by 'EvIcyMetaUpdate' in the audio
+  --   monitor loop (see app/Main.hs).
+  , appNowPlayingScroll  :: !Int
+  -- ^ Scroll offset into 'appIcyMetadata' for long titles. Advanced
+  --   on every 'EvTick' (1 Hz) so titles longer than the now-playing
+  --   pane width scroll horizontally. Reset to 0 on every
+  --   'EvIcyMetaUpdate' so a new song starts at the beginning. The
+  --   render function in 'Tourne.TUI.Draw' concatenates the title
+  --   with itself to achieve seamless wrap-around.
   , appErrorMessage      :: !(Maybe Text)
   , appPingResults       :: !(HashMap Text Double)
   , appVolume            :: !Double
@@ -319,6 +333,13 @@ data AppEvent
   | EvTagsLoaded       ![Tag]
   | EvError            !AppError
   | EvVolumeUpdate     !Double
+  | EvIcyMetaUpdate    !(Maybe Text)
+  -- ^ Carries the latest parsed ICY 'StreamTitle' (or 'Nothing' if
+  --   the title was cleared or the stream ended without sending
+  --   metadata). Fired by the audio monitor loop on the same
+  --   500 ms tick as 'EvPlayerUpdate' and 'EvStreamHealth'. The
+  --   handler is a one-line 'modifySt' that writes the value into
+  --   'appIcyMetadata'.
   | EvShutdown
   | EvPersistNow
   -- ^ Triggered by the TUI when state has changed in a way worth

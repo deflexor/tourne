@@ -104,6 +104,9 @@ main = do
   -- Start background audio state monitor
   _ <- forkIO $ audioMonitorLoop audioEngine chan
 
+  -- Start 1 Hz tick for now-playing scroll
+  _ <- forkIO $ tickLoop chan
+
   -- Run the Brick app (brick-2.12 API). customMain returns the final
   -- AppState; we use it for one last persist call as a safety net
   -- in case the user killed the process with a signal we didn't
@@ -138,4 +141,29 @@ audioMonitorLoop engine eventChan = go
       writeBChan eventChan (EvStreamHealth health)
       vol    <- Audio.readVolume engine
       writeBChan eventChan (EvVolumeUpdate vol)
+      -- The metadata TVar is updated on the audio thread (the
+      -- Streamly stream's step function) when an ICY 'StreamTitle'
+      -- block is consumed. We poll here at 2 Hz so the title
+      -- appears in the TUI within ~500 ms of arriving. The
+      -- writeBChan always fires so the TUI can also detect a
+      -- transition from 'Just title' to 'Nothing' (station switch
+      -- or stream end).
+      meta  <- Audio.readIcyMetadata engine
+      writeBChan eventChan (EvIcyMetaUpdate meta)
+      go
+
+-- | 1 Hz 'EvTick' producer. The tick drives the long-title
+-- horizontal scroll in the now-playing pane: 'EvTick' handler in
+-- 'Tourne.TUI.Events' increments 'appNowPlayingScroll' by 1, and
+-- the render function in 'Tourne.TUI.Draw' advances the visible
+-- window by the same amount. 1 char/sec is the comfortable
+-- "subway-sign" pace — fast enough to be useful, slow enough not
+-- to feel frantic. The 'EvTick' constructor already existed (as a
+-- no-op handler); this is the first real user.
+tickLoop :: BChan AppEvent -> IO ()
+tickLoop eventChan = go
+  where
+    go = do
+      threadDelay 1000000
+      writeBChan eventChan EvTick
       go

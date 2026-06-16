@@ -30,14 +30,28 @@ handleEvent ev = case ev of
   -------------------------------------------------------------------
 
   AppEvent custom -> case custom of
-    EvTick ->
-      pure ()
+    EvTick -> do
+      -- Advance the now-playing scroll by 1 character. The render
+      -- function in Draw.hs concatenates the title with itself so
+      -- a single integer offset is enough for seamless wrap-around.
+      -- Modulo is taken inside the render to keep the state value
+      -- small.
+      modifySt $ \s -> s{ appNowPlayingScroll = appNowPlayingScroll s + 1 }
 
     EvPlayerUpdate playerState ->
       modifySt $ \s -> s{ appPlayerState = playerState }
 
     EvStreamHealth health ->
       modifySt $ \s -> s{ appStreamHealth = health }
+
+    EvIcyMetaUpdate title -> do
+      -- Reset the scroll on every new title. Without this, a
+      -- 30-character title starting at scroll 25 would briefly
+      -- display the end of the previous song when a new song
+      -- starts.
+      modifySt $ \s -> s{ appIcyMetadata      = title
+                         , appNowPlayingScroll = 0
+                         }
 
     EvPingUpdate sid result ->
       modifySt $ \s ->
